@@ -1,6 +1,25 @@
 BeforeAll {
     $repoRoot = Split-Path $PSScriptRoot -Parent
     $script:deploymentResolver = Join-Path $repoRoot '.github/actions/common/resolve-deployment.ps1'
+    $policy = Import-PowerShellDataFile (Join-Path $repoRoot 'scripts/powershell-validation.psd1')
+    Import-Module powershell-yaml -RequiredVersion $policy.Tools['powershell-yaml']
+    $deployAction = Get-Content (Join-Path $repoRoot '.github/actions/deploy/action.yml') -Raw | ConvertFrom-Yaml
+    $script:deploymentTagStep = $deployAction.runs.steps | Where-Object { $_.name -eq 'Push deployment tags' }
+    function gh {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'Arguments', Justification = 'Mock command signature; Pester inspects these arguments.')]
+        param([Parameter(ValueFromRemainingArguments)][string[]]$Arguments)
+    }
+    # Execute the action's actual publishing body after substituting resolver outputs, rather
+    # than maintaining a test copy of the gate/pointer update algorithm.
+    function Invoke-DeploymentTagStep {
+        $run = $script:deploymentTagStep.run
+        foreach ($line in Get-Content $env:GITHUB_OUTPUT) {
+            $name, $value = $line -split '=', 2
+            $run = $run.Replace(('${{ steps.resolve.outputs.' + $name + ' }}'), $value)
+        }
+        & ([scriptblock]::Create($run))
+    }
+    # Supply both caller inputs and event context; repository_dispatch selects by payload identity.
     function Set-DeploymentDispatchFixture {
         param([string]$Selector = 'release-1', [string]$EventName = 'workflow_dispatch')
         $payload = @{ build_run_id = ''; branch = ''; sha = ''; release_tag = '' }
@@ -31,7 +50,7 @@ Describe 'GitHub deployment selection and gates' {
         Set-DeploymentDispatchFixture
         Mock Invoke-RestMethod {
             $run = [pscustomobject]@{ id = 123; path = '.github/workflows/BUILD.yml'; name = 'BUILD'; display_title = 'release-1'; run_name = 'release-1'; head_sha = ('a' * 40); head_branch = 'main'; conclusion = 'success' }
-            $release = [pscustomobject]@{ tag_name = 'release-1'; body = "<!-- alm4dataverse-build-branch:main -->`nBuild: release-1`nSource commit: $('a' * 40)`nBUILD run: [123](https://example/run/123)"; assets = @([pscustomobject]@{ name = 'artifacts.zip' }) }
+            $release = [pscustomobject]@{ tag_name = 'release-1'; prerelease = $true; body = "<!-- alm4dataverse-build-branch:main -->`nBuild: release-1`nSource commit: $('a' * 40)`nBUILD run: [123](https://example/run/123)"; assets = @([pscustomobject]@{ name = 'artifacts.zip' }) }
             if ($Uri -match '/releases/tags/') { return $release }
             if ($Uri -match '/releases\?' -and $Uri -match 'page=1$') { return @($release) }
             if ($Uri -match '/actions/runs/') { return $run }
@@ -54,8 +73,119 @@ Describe 'GitHub deployment selection and gates' {
         $output = Get-Content $env:GITHUB_OUTPUT -Raw
         $output | Should -Match 'build_run_id=123'
         $output | Should -Match 'artifact_source=release'
-        $output | Should -Match 'required_gate_tag=release-1/deployed/DEV'
+        $output | Should -Match 'required_gate_tag=deployed/release-1/DEV'
+        $output | Should -Match 'success_gate_tag=deployed/release-1/TEST'
         $output | Should -Match 'environment_pointer_tag=deployed/TEST'
+    }
+
+    It 'emits gates only for manual promotion while preserving pointers: <Mode>, predecessor <Previous>' -ForEach @(
+        @{ Mode = 'manual-gate-tag'; Previous = ''; Required = ''; Success = 'deployed/release-1/TEST' }
+        @{ Mode = 'manual-gate-tag'; Previous = 'DEV'; Required = 'deployed/release-1/DEV'; Success = 'deployed/release-1/TEST' }
+        @{ Mode = 'environment-approval'; Previous = ''; Required = ''; Success = '' }
+        @{ Mode = 'environment-approval'; Previous = 'DEV'; Required = ''; Success = '' }
+    ) {
+        $env:INPUT_PROMOTION_MODE = $Mode
+        $env:INPUT_PREVIOUS_ENVIRONMENT_NAME = $Previous
+        & $script:deploymentResolver
+        $output = Get-Content $env:GITHUB_OUTPUT
+        $output | Should -Contain "required_gate_tag=$Required"
+        $output | Should -Contain "success_gate_tag=$Success"
+        $output | Should -Contain 'environment_pointer_tag=deployed/TEST'
+    }
+
+    It 'allows the source build tag, success gate, and environment pointer to coexist in Git' {
+        & $script:deploymentResolver
+        $output = Get-Content $env:GITHUB_OUTPUT
+        $gateTag = ($output | Where-Object { $_ -like 'success_gate_tag=*' }) -replace '^success_gate_tag=', ''
+        $pointerTag = ($output | Where-Object { $_ -like 'environment_pointer_tag=*' }) -replace '^environment_pointer_tag=', ''
+        # Mocked refs cannot expose Git's file/directory namespace conflicts; use real local tags.
+        $gitDirectory = Join-Path $TestDrive 'tag-namespace'
+        git init --quiet $gitDirectory
+        $LASTEXITCODE | Should -Be 0
+        git -C $gitDirectory -c user.name=Test -c user.email=test@example.com -c commit.gpgsign=false commit --quiet --allow-empty -m fixture
+        $LASTEXITCODE | Should -Be 0
+        foreach ($tag in @('release-1', $gateTag, $pointerTag)) {
+            git -C $gitDirectory -c tag.gpgsign=false tag $tag
+            $LASTEXITCODE | Should -Be 0
+        }
+        @(git -C $gitDirectory tag --list) | Should -Be @('deployed/TEST', 'deployed/release-1/TEST', 'release-1')
+    }
+
+    Context 'Publishing deployment tags' {
+        BeforeEach {
+            $script:savedTagExitCode = $global:LASTEXITCODE
+            Mock gh {
+                $global:LASTEXITCODE = 0
+                if ($Arguments -contains '/repos/example/repository/git/tags') {
+                    return (@{ sha = ('b' * 40) } | ConvertTo-Json)
+                }
+                '{}'
+            }
+        }
+
+        AfterEach {
+            $global:LASTEXITCODE = $script:savedTagExitCode
+        }
+
+        It 'runs publishing when either a gate or environment pointer is requested' {
+            $script:deploymentTagStep.if | Should -Be "steps.resolve.outputs.success_gate_tag != '' || steps.resolve.outputs.environment_pointer_tag != ''"
+        }
+
+        It 'publishes the annotated pointer and only the requested gate: <Mode>, <EventName>' -ForEach @(
+            @{ Mode = 'manual-gate-tag'; EventName = 'workflow_dispatch'; GateCalls = 1; TotalCalls = 4 }
+            @{ Mode = 'environment-approval'; EventName = 'workflow_dispatch'; GateCalls = 0; TotalCalls = 3 }
+            @{ Mode = 'environment-approval'; EventName = 'repository_dispatch'; GateCalls = 0; TotalCalls = 3 }
+        ) {
+            $env:INPUT_PROMOTION_MODE = $Mode
+            Set-DeploymentDispatchFixture -EventName $EventName
+            & $script:deploymentResolver
+            Invoke-DeploymentTagStep
+            Should -Invoke gh -Times $TotalCalls -Exactly
+            Should -Invoke gh -Times $GateCalls -Exactly -ParameterFilter {
+                $Arguments -contains 'ref=refs/tags/deployed/release-1/TEST' -and
+                $Arguments -contains "sha=$('a' * 40)"
+            }
+            Should -Invoke gh -Times 1 -Exactly -ParameterFilter {
+                $Arguments -contains 'POST' -and $Arguments -contains '/repos/example/repository/git/tags' -and
+                $Arguments -contains 'tag=deployed/TEST' -and $Arguments -contains "object=$('a' * 40)" -and
+                $Arguments -contains 'type=commit' -and
+                ($Arguments -like 'message=*') -match 'BUILD run: 123\nRelease tag: release-1'
+            }
+            Should -Invoke gh -Times 1 -Exactly -ParameterFilter {
+                $Arguments -contains 'DELETE' -and $Arguments -contains '/repos/example/repository/git/refs/tags/deployed/TEST'
+            }
+            Should -Invoke gh -Times 1 -Exactly -ParameterFilter {
+                $Arguments -contains 'POST' -and $Arguments -contains 'ref=refs/tags/deployed/TEST' -and
+                $Arguments -contains "sha=$('b' * 40)"
+            }
+        }
+
+        It 'continues updating the pointer when the success gate already exists' {
+            Mock gh { $global:LASTEXITCODE = 1; '{"message":"Reference already exists"}' } -ParameterFilter {
+                $Arguments -contains 'ref=refs/tags/deployed/release-1/TEST'
+            }
+            & $script:deploymentResolver
+            Invoke-DeploymentTagStep
+            Should -Invoke gh -Times 1 -Exactly -ParameterFilter { $Arguments -contains 'ref=refs/tags/deployed/TEST' }
+        }
+
+        It 'surfaces gate creation failures without moving the pointer' {
+            Mock gh { $global:LASTEXITCODE = 1; '{"message":"Reference update failed"}' } -ParameterFilter {
+                $Arguments -contains 'ref=refs/tags/deployed/release-1/TEST'
+            }
+            & $script:deploymentResolver
+            { Invoke-DeploymentTagStep } | Should -Throw '*Failed to push gate tag*Reference update failed*'
+            Should -Invoke gh -Times 1 -Exactly
+        }
+
+        It 'surfaces pointer creation failures in approval mode' {
+            $env:INPUT_PROMOTION_MODE = 'environment-approval'
+            Mock gh { $global:LASTEXITCODE = 1; '{"message":"Reference update failed"}' } -ParameterFilter {
+                $Arguments -contains 'ref=refs/tags/deployed/TEST'
+            }
+            & $script:deploymentResolver
+            { Invoke-DeploymentTagStep } | Should -Throw '*Failed to create environment pointer tag*Reference update failed*'
+        }
     }
 
     It 'resolves numeric selectors, latest managed releases, and repository dispatches' -ForEach @(
@@ -67,6 +197,101 @@ Describe 'GitHub deployment selection and gates' {
         & $script:deploymentResolver
         Get-Content $env:GITHUB_OUTPUT -Raw | Should -Match 'build_run_name=release-1'
         Get-Content $env:GITHUB_OUTPUT -Raw | Should -Match 'release_tag=release-1'
+    }
+
+    It 'selects the branch-suffixed BUILD Release for a numeric BUILD selector' {
+        $metadataBody = "<!-- alm4dataverse-build-branch:main -->`nBuild: example-main-1`nBranch: main`nSource commit: $('a' * 40)`nBUILD run: [123](https://example/run/123)"
+        $buildRelease = [pscustomobject]@{
+            tag_name = 'v1.2.123-main'
+            prerelease = $true
+            body = "Version: 1.2.123-main`n$metadataBody"
+            assets = @([pscustomobject]@{ name = 'artifacts.zip' })
+        }
+        $nonPrereleaseRelease = [pscustomobject]@{
+            tag_name = 'v1.2.123'
+            prerelease = $false
+            body = "Version: 1.2.123`n$metadataBody"
+            assets = @([pscustomobject]@{ name = 'artifacts.zip' })
+        }
+        $run = [pscustomobject]@{
+            id = 123; path = '.github/workflows/BUILD.yml'; name = 'BUILD'
+            display_title = 'example-main-1'; run_name = 'example-main-1'
+            head_sha = ('a' * 40); head_branch = 'main'; conclusion = 'success'
+        }
+        Mock Invoke-RestMethod {
+            if ($Uri -match '/releases\?' -and $Uri -match 'page=1$') { return @($buildRelease, $nonPrereleaseRelease) }
+            if ($Uri -match '/releases\?' -and $Uri -match 'page=2$') { return @() }
+            if ($Uri -match '/actions/runs/') { return $run }
+            if ($Uri -match '/git/ref/tags/') { return @{ object = @{ type = 'tag'; sha = 'tag-sha' } } }
+            if ($Uri -match '/git/tags/') { return @{ message = 'stable tag'; object = @{ type = 'commit'; sha = ('a' * 40) } } }
+            @()
+        }
+        Set-DeploymentDispatchFixture -Selector '123'
+
+        & $script:deploymentResolver
+        Get-Content $env:GITHUB_OUTPUT -Raw | Should -Match 'release_tag=v1\.2\.123-main'
+        Get-Content $env:GITHUB_OUTPUT -Raw | Should -Match 'artifact_source=release'
+    }
+
+    It 'selects a branch-suffixed BUILD Release by exact BUILD name' {
+        $sourceSha = 'a' * 40
+        $selectedRelease = [pscustomobject]@{
+            tag_name = 'v1.0.43-main'
+            prerelease = $true
+            body = "<!-- alm4dataverse-build-branch:main -->`nBuild: example-main-43`nSource commit: $sourceSha`nBUILD run: [123](https://example/run/123)"
+            assets = @([pscustomobject]@{ name = 'artifacts.zip' })
+        }
+        $selectedBuildRun = [pscustomobject]@{
+            id = 123; path = '.github/workflows/BUILD.yml'; name = 'BUILD'
+            display_title = 'example-main-43'; run_name = 'example-main-43'
+            head_sha = $sourceSha; head_branch = 'main'; conclusion = 'success'
+        }
+        Mock Invoke-RestMethod {
+            if ($Uri -match '/releases/tags/') { return $null }
+            if ($Uri -match '/releases\?' -and $Uri -match 'page=1$') { return @($selectedRelease) }
+            if ($Uri -match '/releases\?' -and $Uri -match 'page=2$') { return @() }
+            if ($Uri -match '/actions/workflows/') { return @{ workflow_runs = @($selectedBuildRun) } }
+            if ($Uri -match '/actions/runs/') { return $selectedBuildRun }
+            if ($Uri -match '/git/ref/tags/') { return @{ object = @{ type = 'tag'; sha = 'tag-sha' } } }
+            if ($Uri -match '/git/tags/') { return @{ message = ''; object = @{ type = 'commit'; sha = $sourceSha } } }
+            @()
+        }
+        Set-DeploymentDispatchFixture -Selector 'example-main-43'
+
+        & $script:deploymentResolver
+        Get-Content $env:GITHUB_OUTPUT -Raw | Should -Match 'build_run_name=example-main-43'
+        Get-Content $env:GITHUB_OUTPUT -Raw | Should -Match 'release_tag=v1\.0\.43-main'
+        Get-Content $env:GITHUB_OUTPUT -Raw | Should -Match 'artifact_source=release'
+    }
+
+    It 'uses the latest managed Release object and its actual branch-suffixed tag' {
+        $sourceSha = 'a' * 40
+        $latestRelease = [pscustomobject]@{
+            tag_name = 'v1.0.43-main'
+            prerelease = $true
+            body = "<!-- alm4dataverse-build-branch:main -->`nBuild: example-main-43`nSource commit: $sourceSha`nBUILD run: [123](https://example/run/123)"
+            assets = @([pscustomobject]@{ name = 'artifacts.zip' })
+        }
+        $latestBuildRun = [pscustomobject]@{
+            id = 123; path = '.github/workflows/BUILD.yml'; name = 'BUILD'
+            display_title = 'example-main-43'; run_name = 'example-main-43'
+            head_sha = $sourceSha; head_branch = 'main'; conclusion = 'success'
+        }
+        Mock Invoke-RestMethod {
+            if ($Uri -match '/releases\?' -and $Uri -match 'page=1$') { return @($latestRelease) }
+            if ($Uri -match '/releases\?' -and $Uri -match 'page=2$') { return @() }
+            if ($Uri -match '/actions/runs/') { return $latestBuildRun }
+            if ($Uri -match '/git/ref/tags/') { return @{ object = @{ type = 'tag'; sha = 'tag-sha' } } }
+            if ($Uri -match '/git/tags/') { return @{ message = ''; object = @{ type = 'commit'; sha = $sourceSha } } }
+            @()
+        }
+        Set-DeploymentDispatchFixture -Selector ''
+
+        & $script:deploymentResolver
+        Get-Content $env:GITHUB_OUTPUT -Raw | Should -Match 'build_run_name=example-main-43'
+        Get-Content $env:GITHUB_OUTPUT -Raw | Should -Match 'release_tag=v1\.0\.43-main'
+        Get-Content $env:GITHUB_OUTPUT -Raw | Should -Match 'artifact_source=release'
+        Should -Invoke Invoke-RestMethod -Times 0 -Exactly -ParameterFilter { $Uri -match '/releases/tags/' }
     }
 
     It 'uses the latest successful branch build when no managed releases exist' {
@@ -150,7 +375,7 @@ Describe 'GitHub deployment selection and gates' {
         { Get-ReleaseInformation -Release @{ body = ''; tag_name = 'invalid' } } | Should -Throw '*complete ALM build metadata*'
         Mock Invoke-GitHubApi {
             if ($RelativePath -match 'page=1$') {
-                $release = [pscustomobject]@{ tag_name = 'release-1'; body = "<!-- alm4dataverse-build-branch:main -->`nBuild: release-1`nSource commit: $('a' * 40)`nBUILD run: [123](https://example/run/123)" }
+                $release = [pscustomobject]@{ tag_name = 'release-1'; prerelease = $true; body = "<!-- alm4dataverse-build-branch:main -->`nBuild: release-1`nSource commit: $('a' * 40)`nBUILD run: [123](https://example/run/123)" }
                 @($release, $release, @{ tag_name = 'invalid'; body = '' })
             }
         }

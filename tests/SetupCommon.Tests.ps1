@@ -6,6 +6,8 @@ BeforeAll {
 
 Describe 'Setup status callback state' {
     BeforeAll {
+        # The embedded Spectre substitute captures renderables and dequeues prompt answers;
+        # it tests wrapper contracts, not terminal rendering. CLR types persist for this process.
         if (-not ('Spectre.Console.AnsiConsole' -as [type])) {
             Add-Type -TypeDefinition @'
 namespace Spectre.Console {
@@ -93,6 +95,8 @@ namespace Spectre.Console.Rendering { public interface IRenderable {} }
     It 'does not repeat a completed operation when the output panel fails' {
         Mock Initialize-SpectreConsole {}
         Mock Show-SetupActivityOutputPanel { throw 'Display failed' }
+        # Shared mutable state crosses the status delegate boundary and reveals an accidental
+        # retry of a completed side effect when only rendering the result failed.
         $executionState = @{ Count = 0 }
         $result = Invoke-WithSpectreStatus -Status 'Test operation' -CaptureOutputInPanel -ScriptBlock {
             $executionState.Count++
@@ -107,6 +111,8 @@ Describe 'Setup selector state transitions' {
     BeforeEach {
         Mock Initialize-SpectreConsole {}
         Mock Write-SetupConsoleBar { $false }
+        # Resolve answers against the current menu instead of hard-coded indexes; unexpected
+        # extra prompts fail immediately rather than silently navigating a different branch.
         $script:menuAnswers = [System.Collections.Generic.Queue[string]]::new()
         $script:textAnswers = [System.Collections.Generic.Queue[string]]::new()
         Mock Select-FromMenu {
@@ -195,6 +201,7 @@ Describe 'Shared setup prompt and rendering contracts' {
     BeforeEach {
         Mock Initialize-SpectreConsole {}
         Mock Write-SetupConsoleBar { $false }
+        # Both the wrappers and fake console hold process/session state between prompt calls.
         Clear-SetupWizardContext
         Clear-SetupPromptDocContext
         [Spectre.Console.AnsiConsole]::Answers.Clear()
@@ -368,6 +375,51 @@ Describe 'Setup configuration and validation helpers' {
         Set-AlmConfigSolutionsInFile -ConfigPath $configPath -Solutions $solutions | Should -BeFalse
     }
 
+    It 'preserves existing per-solution mappings and custom properties when replacing selections' {
+        $configPath = Join-Path $TestDrive 'mapped-solutions.psd1'
+        # Deliberately mix retired solution-level keys with supported inline entries:
+        # refreshing selection must drop the former without discarding mapping metadata.
+        Set-Content -LiteralPath $configPath -Value @'
+@{
+    solutions = @(
+        @{
+            name = 'PluginSolution'
+            mappingFile = 'legacy-mapping.xml'
+            buildCommands = @(@{ executable = 'dotnet'; arguments = @('build') })
+            mappings = @(
+                @{
+                    type = 'FileToFile'
+                    source = 'plugins/Example.dll'
+                    destination = 'PluginAssemblies/Example.dll'
+                    buildCommand = @{
+                        executable = 'dotnet'
+                        arguments = @('build', 'plugins/Example.csproj')
+                    }
+                }
+            )
+            customSetting = @{ keep = $true }
+        }
+        @{ name = 'UnselectedSolution'; mappings = @() }
+    )
+}
+'@
+
+        Set-AlmConfigSolutionsInFile -ConfigPath $configPath -Solutions @(
+            @{ name = 'PluginSolution'; deployUnmanaged = $true }
+        ) | Should -BeTrue
+
+        $solution = (Import-PowerShellDataFile -LiteralPath $configPath).solutions[0]
+        $solution.mappings[0].type | Should -Be 'FileToFile'
+        $solution.mappings[0].source | Should -Be 'plugins/Example.dll'
+        $solution.mappings[0].destination | Should -Be 'PluginAssemblies/Example.dll'
+        $solution.mappings[0].buildCommand.arguments | Should -Be @('build', 'plugins/Example.csproj')
+        $solution.customSetting.keep | Should -BeTrue
+        $solution.deployUnmanaged | Should -BeTrue
+        $solution.ContainsKey('mappingFile') | Should -BeFalse
+        $solution.ContainsKey('buildCommands') | Should -BeFalse
+        (Import-PowerShellDataFile -LiteralPath $configPath).solutions.Count | Should -Be 1
+    }
+
     It 'creates configuration from a template and toggles checker configuration idempotently' {
         $configPath = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.psd1')
         $templatePath = Join-Path $TestDrive 'template.psd1'
@@ -503,5 +555,27 @@ Describe 'Setup publication decisions' {
         Mock Select-FromMenu { $null }
         { Get-RepoChangePublishPlan -ProviderName GitHub -RepositoryName Repo -BaseBranch main -DefaultCommitMessage 'Commit' -DefaultPullRequestTitle 'PR' } | Should -Throw '*No repository publish option selected*'
         { Get-BranchTargetedRepoChangePublishPlan -ProviderName GitHub -RepositoryName Repo -TargetBranch main -DefaultCommitMessage 'Commit' -DefaultPullRequestTitle 'PR' } | Should -Throw '*No repository publish option selected*'
+    }
+}
+
+Describe 'Development ALM4Dataverse reference resolution' {
+    It 'uses the commit for a detached linked worktree' {
+        $repositoryPath = Join-Path $TestDrive 'development-reference-repository'
+        $worktreePath = Join-Path $TestDrive 'development-reference-worktree'
+        New-Item -ItemType Directory -Path $repositoryPath -Force | Out-Null
+
+        & git -C $repositoryPath init --quiet
+        if ($LASTEXITCODE -ne 0) { throw 'Failed to initialize the resolver test repository.' }
+        Set-Content -LiteralPath (Join-Path $repositoryPath 'test.txt') -Value 'test'
+        & git -C $repositoryPath add test.txt
+        if ($LASTEXITCODE -ne 0) { throw 'Failed to stage the resolver test file.' }
+        & git -C $repositoryPath -c user.name=SetupTest -c user.email=setup-test@example.invalid commit --quiet -m 'Test resolver'
+        if ($LASTEXITCODE -ne 0) { throw 'Failed to create the resolver test commit.' }
+        $expectedCommit = (& git -C $repositoryPath rev-parse HEAD).Trim()
+        & git -C $repositoryPath worktree add --quiet --detach $worktreePath HEAD
+        if ($LASTEXITCODE -ne 0) { throw 'Failed to create the detached resolver test worktree.' }
+
+        Resolve-DevelopmentDefaultAlm4DataverseRef -PrimaryRepositoryPath $worktreePath -FallbackRef stable |
+            Should -Be $expectedCommit
     }
 }

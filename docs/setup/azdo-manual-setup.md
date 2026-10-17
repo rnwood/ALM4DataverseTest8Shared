@@ -71,6 +71,7 @@ Create or clone the application repository. Copy these items from the same share
 | Source | Destination |
 | --- | --- |
 | [Configuration template](../../copy-to-your-repo/alm-config.psd1) | `alm-config.psd1` at the root |
+| [AI-agent context](../../copy-to-your-repo/AGENTS.md) | `AGENTS.md` at the root |
 | [Data hook examples](../../copy-to-your-repo/data) | `data/` |
 | [Azure DevOps callers](../../copy-to-your-repo/pipelines) | `pipelines/` |
 
@@ -78,12 +79,21 @@ Do not copy the GitHub workflows unless you also intend to configure GitHub Acti
 Check each caller's shared repository resource. Add an explicit `ref` if you need to
 pin the shared repository to a tag/branch instead of its default branch.
 
+Keep `AGENTS.md` in the application repository and ask an AI agent to read it before
+changing Dataverse components or ALM configuration.
+
 > [!IMPORTANT]
 > In the DEPLOY caller, set the `build` pipeline resource's `source` to the BUILD pipeline's
 > full name, including its folder. Use the displayed path separator: if the UI displays
 > `YourApp\BUILD`, use that exact name. Set the branch filter, caller filename, and pipeline
 > name for your deployment branch. The supplied DEPLOY stages are commented out until
 > you configure targets.
+
+The shared configuration defaults `buildVersion.default` to `1.0`; override it
+or add branch-specific MAJOR.MINOR entries in `alm-config.psd1` when needed.
+
+> [!NOTE]
+> Every BUILD keeps its branch-suffixed SemVer version and source tag.
 
 ## 4. Service Principal Setup
 

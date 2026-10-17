@@ -65,6 +65,14 @@ deploys every solution with `UseUnmanagedSolutions`. That switch overrides indiv
 followed by `preDeploy`, `dataMigrations`, and `postDeploy`. There are no separate
 `preImport` or `postImport` hooks.
 
+The build step runs `npm ci` and `npm run build` for each configured code app before
+packing. After the solution imports and customizations are published, IMPORT runs
+`pac code push` for those apps. Code app project directories and their build output are
+included in build artifacts automatically. `installdependencies.ps1 -ForBuild`
+automatically ensures the configured Node.js version and npm are available only when
+code apps are configured. Each app must have a committed npm lock file. See
+[solution configuration](../config/alm-config.md#solutions).
+
 > [!NOTE]
 > **Advanced: import behavior.** Unmanaged imports use `NoUpgrade` mode and do not set
 > overwrite-unmanaged-customizations. They still use same-version skipping, so IMPORT

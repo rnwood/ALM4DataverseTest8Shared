@@ -9,6 +9,8 @@ BeforeAll {
 
 Describe 'Dependency installation' {
     BeforeEach {
+        # Installation updates PATH and action path files; keep those effects local while mocks
+        # prevent package installation and the fixture directory owns lock/config writes.
         $script:savedEnvironment = @{
             PATH = $env:PATH
             GITHUB_PATH = $env:GITHUB_PATH
@@ -19,14 +21,27 @@ Describe 'Dependency installation' {
         New-Item -ItemType Directory -Path $script:dependencyDirectory -Force | Out-Null
         $env:GITHUB_PATH = Join-Path $script:dependencyDirectory 'github-path.txt'
         $env:TF_BUILD = 'True'
-        Mock Install-Module { [pscustomobject]@{ Version = '3.0.4-preview.1' } }
+        Mock Install-Module { [pscustomobject]@{ Version = '3.2.1-preview.1' } }
         Mock Get-InstalledModule { [pscustomobject]@{ InstalledLocation = (Join-Path $TestDrive 'mock-module') } }
         Mock Import-Module {} -ParameterFilter { $Name -like '*mock-module*' }
         Mock Get-Module {
-            [pscustomobject]@{ Version = [version]'3.0.4'; Prerelease = 'preview.1' }
+            [pscustomobject]@{ Version = [version]'3.2.1'; Prerelease = 'preview.1' }
         } -ParameterFilter { $Name -eq 'Rnwood.Dataverse.Data.PowerShell' }
         Mock Get-Command { [pscustomobject]@{ Source = 'dotnet' } } -ParameterFilter { $Name -eq 'dotnet' }
-        Mock Test-Path { $true } -ParameterFilter { $Path -match '[\\/]\.alm4dataverse[\\/]tools' }
+        Mock Test-Path {
+            param($Path, $LiteralPath)
+            $testPath = if ($Path) { $Path } else { $LiteralPath }
+            if ($testPath -match '[\\/]\.alm4dataverse[\\/]tools') {
+                return $true
+            }
+            $fullPath = if ([System.IO.Path]::IsPathRooted($testPath)) {
+                [System.IO.Path]::GetFullPath($testPath)
+            }
+            else {
+                [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $testPath))
+            }
+            [System.IO.File]::Exists($fullPath) -or [System.IO.Directory]::Exists($fullPath)
+        }
         Mock dotnet { $global:LASTEXITCODE = 0; 'microsoft.powerapps.cli.tool 2.7.4 pac' }
         Push-Location $script:dependencyDirectory
     }
@@ -42,12 +57,12 @@ Describe 'Dependency installation' {
     It 'accepts selector <Selector> when the resolved version meets the minimum' -ForEach @(
         @{ Selector = '' }
         @{ Selector = 'prerelease' }
-        @{ Selector = '3.0.4-preview.1' }
+        @{ Selector = '3.2.1-preview.1' }
     ) {
         Set-Content -LiteralPath 'alm-config.psd1' -Value "@{ scriptDependencies = @{ 'Rnwood.Dataverse.Data.PowerShell' = '$Selector' } }"
         { & (Join-Path $repoRoot 'pipelines/scripts/installdependencies.ps1') } | Should -Not -Throw
         Should -Invoke Get-InstalledModule -Times 1 -Exactly -ParameterFilter {
-            $RequiredVersion -eq '3.0.4-preview.1' -and $AllowPrerelease
+            $RequiredVersion -eq '3.2.1-preview.1' -and $AllowPrerelease
         }
         Should -Invoke dotnet -Times 1 -Exactly -ParameterFilter { $Operation -eq 'update' }
         (Get-Content -LiteralPath $env:GITHUB_PATH -Raw).Trim() | Should -Be (Join-Path $HOME '.alm4dataverse/tools')
@@ -62,10 +77,36 @@ Describe 'Dependency installation' {
 
     It 'uses pinned lock-file module and CLI selectors' {
         Set-Content -LiteralPath 'alm-config.psd1' -Value '@{ pacCliVersion = "2.7.4" }'
-        @{ scriptDependencies = @{ 'Rnwood.Dataverse.Data.PowerShell' = '3.0.4-preview.1' }; pacCliVersion = 'prerelease' } |
+        @{ scriptDependencies = @{ 'Rnwood.Dataverse.Data.PowerShell' = '3.2.1-preview.1' }; pacCliVersion = 'prerelease' } |
             ConvertTo-Json | Set-Content -LiteralPath 'scriptDependencies.lock.json'
         & (Join-Path $repoRoot 'pipelines/scripts/installdependencies.ps1')
-        Should -Invoke Install-Module -Times 1 -Exactly -ParameterFilter { $RequiredVersion -eq '3.0.4-preview.1' -and $AllowPrerelease }
+        Should -Invoke Install-Module -Times 1 -Exactly -ParameterFilter { $RequiredVersion -eq '3.2.1-preview.1' -and $AllowPrerelease }
+    }
+
+    It 'does not resolve Node.js when no build was requested, even with code apps configured' {
+        New-Item -ItemType Directory -Path (Join-Path $script:dependencyDirectory 'apps/code') -Force | Out-Null
+        Set-Content -LiteralPath 'alm-config.psd1' -Value "@{ nodeVersion = 'invalid'; solutions = @(@{ name = 'Contoso'; codeApps = @('apps/code') }) }"
+        Mock Invoke-WebRequest {}
+
+        { & (Join-Path $repoRoot 'pipelines/scripts/installdependencies.ps1') } | Should -Not -Throw
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+    }
+
+    It 'does not resolve Node.js for BUILD when no code apps are configured' {
+        Set-Content -LiteralPath 'alm-config.psd1' -Value "@{ nodeVersion = 'invalid'; solutions = @(@{ name = 'Contoso' }) }"
+        Mock Invoke-WebRequest {}
+
+        { & (Join-Path $repoRoot 'pipelines/scripts/installdependencies.ps1') -ForBuild } | Should -Not -Throw
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+    }
+
+    It 'validates nodeVersion only when BUILD has a configured code app' {
+        New-Item -ItemType Directory -Path (Join-Path $script:dependencyDirectory 'apps/code') -Force | Out-Null
+        Set-Content -LiteralPath 'alm-config.psd1' -Value "@{ nodeVersion = 'invalid'; solutions = @(@{ name = 'Contoso'; codeApps = @('apps/code') }) }"
+        Mock Invoke-WebRequest {}
+
+        { & (Join-Path $repoRoot 'pipelines/scripts/installdependencies.ps1') -ForBuild } | Should -Throw '*nodeVersion*invalid*'
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
     }
 
     It 'accepts PAC selector <Selector>' -ForEach @(

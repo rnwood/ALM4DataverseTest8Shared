@@ -27,6 +27,12 @@ Application teams should start with [updating and customizing](usage/updating.md
 
 ## Local Checks
 
+For comment/help changes, follow the
+[commenting standard](development/powershell.md#commenting-standard) and
+[repository instructions](../AGENTS.md). Review generated
+installers and caller templates as well as the source: prose inside embedded code
+can alter emitted content even when the outer script still parses.
+
 Use PowerShell 7.2 or newer from the repository root. YAML-related checks require `powershell-yaml`;
 the documentation checker also uses `ConvertFrom-Markdown`/Markdig supplied with PowerShell.
 Install the pinned validation tools from the trusted PowerShell Gallery:
@@ -123,6 +129,8 @@ $outputDirectory = Join-Path ([IO.Path]::GetTempPath()) ('alm-release-' + [guid]
 
 The [stable-release workflow](../.github/workflows/stable-release.yml) responds to pushed
 version tags in the configured three/four-part `v` formats, such as `v1.2.3` or `v1.2.3.4`.
+This publishes the shared ALM4Dataverse code and standalone setup scripts; it is separate
+from branch-suffixed BUILD prereleases and does not promote a BUILD artifact.
 Releasing is a deliberate remote operation:
 
 1. Review the intended source commit, docs, compatibility changes, local checks, and non-production hosted/Dataverse test results.
@@ -145,7 +153,7 @@ the intended assets after publication.
 
 Before release, test relevant changes using intended non-production credentials on both
 platforms where they affect shared behavior. Include authentication modes, source export,
-managed/unmanaged imports, upgrade paths, hooks, workflow promotion, retention/baselines,
+managed/unmanaged imports, upgrade paths, hooks, deployment gates, retention/baselines,
 and retries proportionately to the change. Validate generated caller behavior in hosted
 runs as well as offline YAML checks.
 

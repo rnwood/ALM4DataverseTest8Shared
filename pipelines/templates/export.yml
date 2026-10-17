@@ -1,3 +1,5 @@
+# Export mutates the selected Dev branch/environment; retained checkout credentials
+# are needed for the final push, not for Dataverse authentication.
 parameters:
 - name: commitMessage
   type: string
@@ -48,6 +50,8 @@ stages:
               authenticationType: 'PowerPlatformSPN'
               PowerPlatformSPN: Dev-${{ variables['Build.SourceBranchName'] }}
 
+        # Resolve-ConnectionVariable returns the first nonempty, expanded candidate
+        # or null. Unknown task-output macros must not be passed as credentials.
         - pwsh: |
               & "$(Pipeline.Workspace)/alm/pipelines/scripts/installdependencies.ps1"
               $environmentUrl = '$(ALM4DataverseSetConnectionVariables.EnvironmentUrl)'
@@ -102,7 +106,9 @@ stages:
                 -SourceDirectory "$(Pipeline.Workspace)/self" `
                 -ArtifactStagingDirectory "$(Build.ArtifactStagingDirectory)" `
                 -TempDirectory "$(Agent.TempDirectory)" `
-                -EnvironmentName "Dev-${{ variables['Build.SourceBranchName'] }}"
+                -EnvironmentName "Dev-${{ variables['Build.SourceBranchName'] }}" `
+                -BranchName "$(Build.SourceBranch)" `
+                -DefaultBranchName "$(Build.Repository.DefaultBranch)"
           displayName: 'Connect and Export Solutions'
           workingDirectory: '$(Pipeline.Workspace)/self'
           env:
@@ -113,6 +119,8 @@ stages:
               AZURE_TENANT_ID: $(PowerPlatformSetConnectionVariables.BuildTools.TenantId)
               AZURE_CLIENT_SECRET: $(PowerPlatformSetConnectionVariables.BuildTools.ClientSecret)
 
+        # Push to the explicit source ref because pipeline checkout may be detached.
+        # The existing exit-code policy treats commit exit 1 as no changes.
         - pwsh: |
             $ErrorActionPreference = 'Stop'
             git config user.email "$(Build.RequestedForEmail)"

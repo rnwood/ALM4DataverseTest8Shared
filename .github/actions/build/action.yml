@@ -1,3 +1,5 @@
+# The caller owns job permissions: publishing tags/Releases and dispatching requires
+# contents:write; Azure OIDC also requires id-token:write when validation is enabled.
 name: Build
 description: Build, validate, optionally deploy a baseline and candidate to the validation environment, publish, and tag Dataverse solution artifacts.
 
@@ -35,6 +37,9 @@ outputs:
   run-name:
     description: Exact build name used for deployment selection.
     value: ${{ inputs.build-name }}
+  build-version:
+    description: SemVer prerelease version assigned to this BUILD.
+    value: ${{ steps.resolve-version.outputs.version }}
   release-tag:
     description: Git tag used by the GitHub Release for this build.
     value: ${{ steps.tag-source.outputs.tag_name }}
@@ -45,6 +50,8 @@ outputs:
 runs:
   using: composite
   steps:
+    # Build the explicitly selected source, not necessarily the caller workflow SHA.
+    # Action implementation paths remain github.action_path rather than self/alm.
     - name: Checkout source code
       uses: actions/checkout@v4
       with:
@@ -52,6 +59,33 @@ runs:
         path: self
         fetch-depth: 1
 
+    # Branch identity drives versioning and downstream dispatch, independently of
+    # source-ref checkout. A non-branch workflow ref needs an explicit branch override.
+    - name: Resolve SemVer build version
+      id: resolve-version
+      shell: pwsh
+      working-directory: ${{ github.workspace }}/self
+      env:
+        BUILD_BRANCH: ${{ inputs.source-branch != '' && inputs.source-branch || github.ref_name }}
+        BUILD_BRANCH_OVERRIDE: ${{ inputs.source-branch }}
+        GITHUB_REF_TYPE: ${{ github.ref_type }}
+        BUILD_RUN_NUMBER: ${{ github.run_number }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        if ([string]::IsNullOrWhiteSpace($env:BUILD_BRANCH_OVERRIDE) -and $env:GITHUB_REF_TYPE -ne 'branch') {
+          throw "BUILD SemVer requires a branch source; selected ref type is '$($env:GITHUB_REF_TYPE)'."
+        }
+        . "${{ github.action_path }}/../../../pipelines/scripts/common.ps1"
+        $config = Get-AlmConfig -BaseDirectory "${{ github.workspace }}/self" -LogConfig $false
+        $version = Resolve-AlmBuildVersion -Config $config -BranchName $env:BUILD_BRANCH -RunNumber $env:BUILD_RUN_NUMBER -Provider github
+        "version=$($version.Version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+        "tag_name=$($version.TagName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+        "BUILD_VERSION=$($version.Version)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "BUILD_TAG=$($version.TagName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        Write-Host "Resolved BUILD version $($version.Version)"
+
+    # Keys reflect requested versions (or lock pins); restore never substitutes for
+    # installation/import in the build process, particularly with floating selectors.
     - name: Resolve dependency cache keys
       id: dependency-cache
       shell: pwsh
@@ -76,16 +110,21 @@ runs:
         key: ${{ steps.dependency-cache.outputs.pac_cache_key }}
         path: ~/.alm4dataverse/tools
 
+    # Preserve the caller's exact display name separately from the SemVer Release tag.
     - name: Set build number
       id: build-number
       shell: pwsh
       env:
         BUILD_NAME: ${{ inputs.build-name }}
+        BUILD_VERSION: ${{ steps.resolve-version.outputs.version }}
       run: |
         echo "BUILD_NUMBER=$env:BUILD_NAME" >> $env:GITHUB_ENV
         "run_name=$env:BUILD_NAME" >> $env:GITHUB_OUTPUT
+        "build_version=$env:BUILD_VERSION" >> $env:GITHUB_OUTPUT
         Write-Host "Exact build name: $env:BUILD_NAME"
 
+    # An empty validation environment skips mapping/login/deployment, not packing
+    # or any enabled solution checks. Secrets are restricted to the caller's selection.
     - name: Resolve prefixed repo variables and explicit secrets
       if: inputs.environment-name != ''
       shell: pwsh
@@ -102,6 +141,8 @@ runs:
       run: |
         & "${{ github.action_path }}/../common/validate-auth.ps1" -RequireServiceAccount
 
+    # No client secret selects OIDC; otherwise the mapper supplies secret credentials.
+    # Authentication is subscription-less because the target is Dataverse.
     - name: Log in to Azure with GitHub OIDC
       if: inputs.environment-name != ''
       uses: azure/login@v3
@@ -113,21 +154,35 @@ runs:
         creds: ${{ env.ALM_AZURE_CREDENTIALS || '' }}
         allow-no-subscriptions: true
 
+    # Keep module installation, connection, build and validation in one pwsh process:
+    # loaded modules/default Dataverse connection cannot cross action step boundaries.
+    # Metadata records checked-out HEAD, while connection-reference JSON becomes
+    # per-reference process variables before baseline-then-candidate deployment.
     - name: Build artifacts and validate deployment
       shell: pwsh
       working-directory: ${{ github.workspace }}/self
       env:
         BUILD_ENVIRONMENT_NAME: ${{ inputs.environment-name }}
         GITHUB_TOKEN: ${{ github.token }}
+        BUILD_BRANCH: ${{ inputs.source-branch != '' && inputs.source-branch || github.ref_name }}
+        BUILD_RUN_NUMBER: ${{ github.run_number }}
       run: |
         $ErrorActionPreference = 'Stop'
-        & "${{ github.action_path }}/../../../pipelines/scripts/installdependencies.ps1"
+        & "${{ github.action_path }}/../../../pipelines/scripts/installdependencies.ps1" -ForBuild
         if (-not [string]::IsNullOrWhiteSpace($env:BUILD_ENVIRONMENT_NAME)) {
           & "${{ github.action_path }}/../../../pipelines/scripts/connect.ps1" -Url $env:DATAVERSE_URL
         }
         & "${{ github.action_path }}/../../../pipelines/scripts/build.ps1" `
           -SourceDirectory "${{ github.workspace }}/self" `
           -ArtifactStagingDirectory "${{ github.workspace }}/artifacts"
+        . "${{ github.action_path }}/../../../pipelines/scripts/common.ps1"
+        $config = Get-AlmConfig -BaseDirectory "${{ github.workspace }}/self" -LogConfig $false
+        $version = Resolve-AlmBuildVersion -Config $config -BranchName $env:BUILD_BRANCH -RunNumber '${{ github.run_number }}' -Provider github
+        Write-AlmBuildVersionInfo `
+          -ArtifactsPath (Join-Path $env:GITHUB_WORKSPACE 'artifacts') `
+          -BuildVersion $version `
+          -RunId '${{ github.run_id }}' `
+          -SourceCommit (git rev-parse HEAD).Trim()
 
         if (-not [string]::IsNullOrWhiteSpace($env:BUILD_ENVIRONMENT_NAME)) {
           if (-not [string]::IsNullOrWhiteSpace($env:DATAVERSE_CONNECTION_REFS)) {
@@ -145,6 +200,8 @@ runs:
           Write-Host '##[endgroup]'
         }
 
+    # Preserve partial outputs/checker diagnostics after failures; success-only tag
+    # and Release steps below must not publish a failed build as deployable.
     - name: Upload build artifacts
       if: always()
       id: upload-build-artifacts
@@ -167,25 +224,18 @@ runs:
         overwrite: true
         if-no-files-found: ignore
 
+    # Reruns may reuse a source tag only at the same commit; never move a published
+    # BUILD identity to a different source commit.
     - name: Tag source with build version
       id: tag-source
       shell: pwsh
       working-directory: ${{ github.workspace }}/self
       run: |
         $ErrorActionPreference = 'Stop'
-        $rawBuildNumber = $env:BUILD_NUMBER
-        $sanitizedBuildNumber = $rawBuildNumber `
-          -replace '[^a-zA-Z0-9._/-]', '-' `
-          -replace '\.{2,}', '-' `
-          -replace '/{2,}', '/'
-        $sanitizedBuildNumber = $sanitizedBuildNumber.Trim('/', '.')
-        if ($sanitizedBuildNumber.EndsWith('.lock')) {
-          $sanitizedBuildNumber = $sanitizedBuildNumber -replace '\.lock$', '-lock'
+        $tagName = $env:BUILD_TAG
+        if ($tagName -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-[a-z0-9.-]+$') {
+          throw "Resolved BUILD tag '$tagName' is not a valid SemVer prerelease tag."
         }
-        if ([string]::IsNullOrWhiteSpace($sanitizedBuildNumber)) {
-          throw "Build number '$rawBuildNumber' cannot be converted to a valid git tag value"
-        }
-        $tagName = $sanitizedBuildNumber
         $tagRef = "refs/tags/$tagName"
         $sourceCommit = (git rev-parse HEAD).Trim()
         if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sourceCommit)) {
@@ -215,7 +265,7 @@ runs:
           Write-Host "Build tag '$tagName' already points to this source commit; continuing as an idempotent rerun."
         }
         else {
-          git tag -a "$tagName" -m "Build version $sanitizedBuildNumber"
+          git tag -a "$tagName" -m "Build version $env:BUILD_VERSION"
           if ($LASTEXITCODE -ne 0) { throw 'git tag failed' }
           git push origin "$tagName"
           if ($LASTEXITCODE -ne 0) { throw 'git push tag failed' }
@@ -224,6 +274,10 @@ runs:
         "tag_name=$tagName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         "source_sha=$sourceCommit" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
+    # Download-ArtifactArchive fetches the uploaded artifact by ID as its ZIP and
+    # rejects missing/empty files. Reuse that archive layout as artifacts.zip so
+    # Release consumers see the same artifact root as Actions artifact consumers.
+    # The checker archive is optional; the deployment archive is mandatory.
     - name: Download artifact archives for GitHub Release
       id: release-assets
       if: success()
@@ -267,13 +321,19 @@ runs:
         "artifacts_path=$artifactsPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         "solution_check_report_path=$reportPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
+    # The JS block's encoded branch marker and BUILD run/source lines are a machine
+    # contract consumed by resolve-deployment.ps1 and deploy-build-validation.ps1.
+    # Only this run's existing Release can be updated; only a 404 permits creation.
+    # Replace assets by name on rerun, and keep BUILD Releases marked prerelease.
     - name: Create GitHub Release
       id: create-release
       if: success()
       uses: actions/github-script@v7
       env:
         RELEASE_TAG: ${{ steps.tag-source.outputs.tag_name }}
-        RELEASE_NAME: ${{ steps.build-number.outputs.run_name }}
+        RELEASE_NAME: ${{ steps.resolve-version.outputs.version }}
+        BUILD_NAME: ${{ steps.build-number.outputs.run_name }}
+        BUILD_VERSION: ${{ steps.resolve-version.outputs.version }}
         BUILD_BRANCH: ${{ inputs.source-branch != '' && inputs.source-branch || github.ref_name }}
         BUILD_SOURCE_SHA: ${{ steps.tag-source.outputs.source_sha }}
         BUILD_RUN_ID: ${{ github.run_id }}
@@ -288,7 +348,8 @@ runs:
           const branchMarker = `<!-- alm4dataverse-build-branch:${encodeURIComponent(branchName)} -->`;
           const body = [
             branchMarker,
-            `Build: ${process.env.RELEASE_NAME}`,
+            `Build: ${process.env.BUILD_NAME}`,
+            `Version: ${process.env.BUILD_VERSION}`,
             `Branch: ${branchName}`,
             `Source commit: ${process.env.BUILD_SOURCE_SHA}`,
             `BUILD run: [${process.env.BUILD_RUN_ID}](${process.env.BUILD_RUN_URL})`
@@ -308,11 +369,11 @@ runs:
             if (!existingBody.includes(branchMarker) || !runMatch || runMatch[1] !== process.env.BUILD_RUN_ID || (commitMatch && commitMatch[1].toLowerCase() !== process.env.BUILD_SOURCE_SHA.toLowerCase())) {
               throw new Error(`Existing GitHub Release for tag ${tagName} is not owned by this BUILD run.`);
             }
-            release = (await github.rest.repos.updateRelease({ owner: context.repo.owner, repo: context.repo.repo, release_id: release.id, name: process.env.RELEASE_NAME, body, draft: false, prerelease: false })).data;
+            release = (await github.rest.repos.updateRelease({ owner: context.repo.owner, repo: context.repo.repo, release_id: release.id, name: process.env.RELEASE_NAME, body, draft: false, prerelease: true })).data;
           }
           catch (error) {
             if (error.status !== 404) throw error;
-            release = (await github.rest.repos.createRelease({ owner: context.repo.owner, repo: context.repo.repo, tag_name: tagName, target_commitish: process.env.BUILD_SOURCE_SHA, name: process.env.RELEASE_NAME, body, draft: false, prerelease: false })).data;
+            release = (await github.rest.repos.createRelease({ owner: context.repo.owner, repo: context.repo.repo, tag_name: tagName, target_commitish: process.env.BUILD_SOURCE_SHA, name: process.env.RELEASE_NAME, body, draft: false, prerelease: true })).data;
           }
 
           const existingAssets = await github.paginate(github.rest.repos.listReleaseAssets, { owner: context.repo.owner, repo: context.repo.repo, release_id: release.id, per_page: 100 });
@@ -324,6 +385,9 @@ runs:
           }
           core.setOutput('release_url', release.html_url);
 
+    # Branch-normalized event types route to branch-specific DEPLOY workflows.
+    # Payload SHA/tag/run refer to the build just published, not the receiving
+    # workflow's default-branch SHA. Native gh failure must fail this handoff.
     - name: Trigger DEPLOY via repository_dispatch
       shell: pwsh
       env:

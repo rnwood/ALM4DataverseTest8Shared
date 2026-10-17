@@ -52,7 +52,8 @@ workflows, and offers shared BUILD deployment validation with an optional baseli
 
 > [!IMPORTANT]
 > Verify plan compatibility and the generated protection rules. Setup selects
-> `environment-approval` when it detects support, or prefixed repository variables plus
+> `environment-approval` when it detects support, or repository variables (optionally
+> environment-prefixed) plus
 > `manual-gate-tag` otherwise. The fallback still stores client secrets in the matching
 > GitHub environment; it does not make private GitHub Free repositories a fully supported
 > out-of-the-box configuration.
@@ -99,12 +100,16 @@ Copy the following from a consistent ALM4Dataverse release into your application
 | Source | Destination |
 | --- | --- |
 | [alm-config.psd1](../../copy-to-your-repo/alm-config.psd1) | Repository root |
+| [AI-agent context](../../copy-to-your-repo/AGENTS.md) | `AGENTS.md` at the repository root |
 | [data](../../copy-to-your-repo/data) | `data/` |
 | [GitHub workflows](../../copy-to-your-repo/.github/workflows) | `.github/workflows/` |
 
 Include the hidden `.github` directory. Do not copy the Azure DevOps `pipelines` callers
 unless you also intend to configure that platform. Select a tested action/workflow ref
 instead of unintentionally following the template's `@main` references.
+
+Automated setup syncs the same `AGENTS.md` scaffold. Keep it in the application repository
+and ask an AI agent to read it before changing Dataverse components or ALM configuration.
 
 The caller workflows are BUILD, EXPORT, IMPORT, DEPLOY-main, and CLEANUP-RELEASES.
 Configure `solutions` using unique names in dependency order, then customize optional
@@ -131,7 +136,7 @@ The complete settings are maintained in one [credential reference](../config/git
 | --- | --- |
 | Environment values with WIF | [WIF settings and subjects](../config/github-secrets.md#approach-1-workload-identity-federation-oidc) |
 | Environment values with a client secret | [Client-secret settings](../config/github-secrets.md#approach-2-github-environments-with-client-secret) |
-| Prefixed repository values | [Prefixes, aliases, and secrets](../config/github-secrets.md#approach-3-prefixed-repository-variables-and-secrets) |
+| Repository values | [Repository variables and secrets](../config/github-secrets.md#approach-3-repository-variables-and-secrets) |
 | Connection references and Dataverse variables | [Per-solution settings](../config/github-secrets.md#per-solution-connection-references) |
 | Custom secrets and process-owner keys | [Explicit mapping](../config/github-secrets.md#per-solution-environment-variable-values) |
 

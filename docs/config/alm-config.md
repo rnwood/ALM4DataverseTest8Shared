@@ -41,16 +41,61 @@ The supplied template additionally includes the `data` asset and example data ho
 | Setting | Type | Default or template value |
 | --- | --- | --- |
 | `solutions` | Array of hashtables | Empty in the template; list solutions in dependency order. |
+| `buildVersion` | Hashtable | Shared default is `'1.0'`; optional MAJOR.MINOR override and full-branch overrides. |
 | `export` | Hashtable | Up to two concurrent package exports; a shared limit of four operations with version updates. |
 | `assets` | Array of paths | `@('data')` in the template. |
 | `hooks` | Hashtable of script-path arrays | Empty except the template's `postExport` and `postDeploy` data hooks. |
-| `scriptDependencies` | Hashtable of module names and versions | `Rnwood.Dataverse.Data.PowerShell = '3.0.3'`. |
+| `scriptDependencies` | Hashtable of module names and versions | `Rnwood.Dataverse.Data.PowerShell = '3.2.0'`. |
 | `pacCliVersion` | String | `'2.7.4'`. |
+| `nodeVersion` | String | `'22'`; used only by BUILD/IMPORT when at least one solution configures `codeApps`. |
 | `importTimeoutSeconds` | Number of seconds | `10800` per import. |
 | `buildValidation.baselineRelease` | String | `''`; no baseline. |
 | `solutionCheck` | Hashtable | Disabled; full settings below. |
 
 ## Configuration Sections
+
+### BUILD SemVer
+
+`buildVersion` assigns a MAJOR.MINOR version line to each branch. Set a shared
+default and, when needed, full branch-name overrides:
+
+```powershell
+buildVersion = @{
+    default = '1.0'
+    branches = @{
+        main          = '2.0'
+        develop       = '1.5'
+        'release/1.x' = '1.4'
+    }
+}
+```
+
+The shared configuration defaults `buildVersion.default` to `'1.0'`. Set
+`default` to override the base for unlisted branches, and add entries under
+`branches` for branch-specific release lines.
+
+> [!NOTE]
+> **Advanced: version derivation.** Branch keys are full branch names, including
+> any slash-separated prefix. Values must be two non-negative SemVer integers
+> without leading zeroes, such as `'2.1'`; BUILD and EXPORT fail early if the
+> selected value is invalid.
+>
+> The CI run number supplies PATCH, and the normalized branch name is the
+> SemVer prerelease identifier. For example, `main` might produce
+> `2.1.42-main`, while `feat/abc` with the default `1.0` base might produce
+> `1.0.43-feat-abc`. Slashes and other branch punctuation become hyphens.
+> Numeric-only branch slugs with leading zeroes get a `b` prefix to remain
+> valid SemVer identifiers (for example, branch `01` becomes `b01`). Every
+> build retains this branch suffix in its version and source tag; no stable
+> build promotion is provided.
+>
+> For solution versions, the configured MAJOR.MINOR maps to the Dataverse
+> solution's `Major.Build` components. The solution's `Minor` component remains
+> the non-additive upgrade counter used by DEPLOY.
+>
+> `build-version.json` in each artifact records its version, branch, provider,
+> source commit, and exact CI run ID. Azure DevOps and GitHub keep the original
+> branch-suffixed build identity for deployment and baseline selection.
 
 ### Solutions
 
@@ -62,6 +107,7 @@ solutions = @(
         name                      = 'MySolution'
         deployUnmanaged           = $false  # Optional
         serviceAccountUpnConfigKey = 'MySolutionServiceAccountUpn'  # Optional
+        codeApps                  = @('code-apps/customer-portal')  # Optional
     }
 )
 ```
@@ -71,9 +117,17 @@ solutions = @(
 - `name` (required): Dataverse unique solution name, not display name; must match `solutions/<name>` in source control.
 - `deployUnmanaged` (optional, default: false): Boolean indicating whether to deploy the unmanaged version instead of managed
 - `serviceAccountUpnConfigKey` (optional, default: 'DataverseServiceAccountUpn'): Name of the environment configuration key containing the service account UPN to use when activating processes in this solution
+- `codeApps` (optional): One or more code app project directories, relative to the repository root, to build and publish after this solution is deployed. Each project must contain `package.json`, `package-lock.json` (or `npm-shrinkwrap.json`), and `power.config.json`. BUILD and IMPORT run `npm ci` followed by `npm run build`, then include the project and built output in the artifacts, excluding `node_modules` and `.git`. The dependency installer ensures the configured `nodeVersion` and npm are available only when BUILD/IMPORT has at least one code app. Do not also list code app directories in `assets`.
 - `solutionCheck` (optional): Per-solution PAC checker settings merged with global `solutionCheck` settings (see below). Set `solutionCheck.enabled = $false` to skip checking a specific solution.
+- `mappings` (optional): Ordered SolutionPackager mapping entries used during BUILD and EXPORT; each entry may include the build command that produces its source during BUILD; see [Build Processing](#build-processing).
 
 `BUILD` packs both managed and unmanaged packages. `DEPLOY` selects the package using `deployUnmanaged`; `IMPORT` always selects unmanaged packages for every solution. Use managed deployment for controlled downstream environments unless you have a specific reason to retain unmanaged customizations.
+
+BUILD and IMPORT install locked dependencies and run each configured app's
+`npm run build` script before packaging it. DEPLOY uses that built output from the
+selected artifact. After publishing Dataverse customizations, deployment runs
+`pac code push` for each configured app, targeting the current environment and its owning
+solution. PAC uses the authentication established by the normal `connect.ps1` step.
 
 The service account is a real Dataverse user used to own and activate processes, not the
 application user used to authenticate.
@@ -85,6 +139,16 @@ application user used to authenticate.
 > on Linux, where environment variables are case-sensitive. See the
 > [Azure DevOps variable reference](azdo-environment-variable-group.md) or
 > [GitHub variable reference](github-secrets.md).
+
+### Node.js for Code Apps
+
+`nodeVersion` accepts a major version such as `'22'` or an exact release such as
+`'22.14.0'`. For a major version, the installer reuses an already available compatible
+Node.js version or downloads the latest stable patch from nodejs.org. Exact versions
+are pinned. Downloads are checksum-verified and cached under the runner user's
+`.alm4dataverse/tools/node` directory. This setup runs only when the dependency installer
+is invoked with its build flag by BUILD or IMPORT and at least one `codeApps` path is
+configured; EXPORT and deployment-only jobs do not install Node.js.
 
 ### Export Processing
 
@@ -100,12 +164,18 @@ export = @{
 | --- | --- | --- | --- |
 | `export.parallel` | Boolean | `$true` | Export managed and unmanaged packages concurrently; `$false` retains sequential export. |
 | `export.maxParallel` | Integer, `1` to `8` | `2` | Maximum simultaneous package exports, including both packages of the same solution. |
-| `export.maxConcurrentOperations` | Integer, `1` to `8` | `4` | Shared limit for package exports and environment version updates. Custom hooks are not limited by this setting. |
+| `export.maxConcurrentOperations` | Integer, `1` to `8` | `4` | Shared limit for package exports and environment version updates. Per-solution parallel hooks can use their provided `OperationBudget` to share this limit. |
 
 Missing, null, or empty optional settings use the defaults; an explicit `$false`
 is preserved. Invalid types or out-of-range limits fail with a configuration error.
 Unpacking, change detection, and version updates run in configured solution order.
 Pre-export and post-export hooks keep their existing order and context.
+When mappings are configured, EXPORT generates the mapping XML from the same
+entries and uses it to unpack both packages and compare managed solution
+packages. `buildCommand` is BUILD-only and is not run during EXPORT. If an
+existing solution is being compared, mapped source paths must already exist so
+the previous package can be reconstructed; the first export has no previous
+package to compare.
 
 See [Export Logs](../usage/exporting-changes.md#export-logs) for progress messages,
 per-solution summaries and retained diagnostics.
@@ -121,11 +191,98 @@ build = @{
 
 | Setting | Type | Default | Behavior |
 | --- | --- | --- | --- |
-| `build.parallel` | Boolean | `$true` | Pack solutions concurrently; `$false` packs them sequentially. |
-| `build.maxParallel` | Integer, `1` to `8` | `2` | Maximum number of solutions packed at the same time. |
+| `build.parallel` | Boolean | `$true` | Run eligible build commands and solution packs in parallel within their respective stages; `$false` runs both stages sequentially. |
+| `build.maxParallel` | Integer, `1` to `8` | `2` | Maximum concurrent build commands or solution packs within each stage. |
 
 Missing, null, or empty optional settings use the defaults; an explicit `$false`
 is preserved. Invalid types or out-of-range limits fail with a configuration error.
+
+`mappings` is an ordered array of entries. Each entry directly represents one
+SolutionPackager directive and may include a `buildCommand` to produce its
+source before packing. This example builds a plugin DLL, maps a web-resource
+folder, and maps matching files from another folder:
+
+```powershell
+solutions = @(
+    @{
+        name = 'ContosoCore'
+        mappings = @(
+            @{
+                type = 'FileToFile'
+                source = 'plugins/Contoso.Plugin/bin/Release/Contoso.Plugin.dll'
+                destination = 'PluginAssemblies\Contoso.Plugin.dll'
+                buildCommand = @{
+                    name = 'Build plugin'
+                    executable = 'dotnet'
+                    arguments = @('build', 'plugins/Contoso.Plugin/Contoso.Plugin.csproj', '--configuration', 'Release')
+                    workingDirectory = '.'
+                }
+            }
+            @{
+                type = 'Folder'
+                source = 'webresources'
+                destination = 'WebResources'
+            }
+            @{
+                type = 'FileToPath'
+                source = 'other-resources'
+                destination = 'Other\*.json'
+            }
+        )
+    }
+)
+```
+
+Each entry has these properties:
+
+- `type` (required): `Folder`, `FileToFile`, or `FileToPath`, matching the
+  SolutionPackager directive.
+- `source` (required): Path to the source file or folder. Relative paths are
+  resolved from the repository root; absolute paths and `%variable%`
+  environment-variable references are also supported.
+- `destination` (required): Path or pattern in the solution package. Relative
+  paths are resolved from that solution's folder; absolute paths and
+  `%variable%` references are also supported.
+- `buildCommand` (optional): Command to run before packing this mapping's
+  source during BUILD. EXPORT does not run build commands. It uses `executable`,
+  an `arguments` array, optional `workingDirectory`, and optional `parallel`
+  (default `$true`).
+
+Source paths are checked after build commands run. The mapping array's order is
+preserved in the generated mapping XML and therefore determines precedence
+when rules overlap.
+
+The directives follow the [official SolutionPackager mapping specification](https://learn.microsoft.com/en-us/power-platform/alm/solution-packager-tool):
+
+- `Folder` maps folder hierarchies and does not support wildcards or file names.
+- `FileToFile` requires a filename in both `map` and `to`; filename wildcards
+  are not supported, although the folder wildcard `\**` is.
+- `FileToPath` requires a filename or filename pattern in `map` (for example,
+  `*.ext` or `*.*`); `to` must be a folder path without a filename.
+- Earlier directives take precedence. A matched file must exist in at least
+  one alternative location or SolutionPackager reports an error.
+
+ALM4Dataverse generates the XML mapping file from `mappings` in a temporary
+location for packing and unpacking and removes it afterward; users do not
+maintain a separate mapping file. The former `mappingFile` and solution-level
+`buildCommands` settings are not accepted. BUILD and export package comparison
+require a version of `Rnwood.Dataverse.Data.PowerShell` that supports
+`Compress-DataverseSolutionFile -MappingFile`. EXPORT also requires
+`Expand-DataverseSolutionFile -MappingFile` when parallel export is enabled, or
+`Export-DataverseSolution -MappingFile` when it is disabled. The pipeline fails
+early with an instruction to update the module dependency if a required
+parameter is unavailable. The mapping-aware unpack cmdlets retain automatic
+`.msapp` folder preprocessing.
+
+Build commands use an executable and an argument array (not a shell command
+string); each argument is passed as a distinct process argument.
+`workingDirectory` is optional and defaults to the repository root; relative
+working directories are resolved from that root. Commands are grouped by
+consecutive `parallel` values in mapping order. Parallel commands run
+concurrently, limited by `build.maxParallel`; set an individual command's
+`parallel = $false` to run it sequentially. Groups execute in order, and all
+commands finish before solution packing begins. When `build.parallel = $false`,
+all commands run sequentially in solution and mapping order.
 
 ### Assets
 
@@ -162,19 +319,25 @@ Example hooks:
 
 ```powershell
 hooks = @{
-    preExport      = @()
-    postExport     = @('data/system/export.ps1')
-    preDeploy      = @()
-    dataMigrations = @()
-    postDeploy     = @('data/system/import.ps1')
-    preBuild       = @()
-    postBuild      = @()
+    preExport              = @()
+    preExportSolution      = @()
+    parallelExportSolution = @()
+    postExportSolution     = @()
+    postExport             = @('data/system/export.ps1')
+    preDeploy              = @()
+    dataMigrations         = @()
+    postDeploy             = @('data/system/import.ps1')
+    preBuild               = @()
+    postBuild              = @()
 }
 ```
 
 **Available Hooks:**
 
 - **preExport**: Called before exporting solutions from a Dataverse environment
+- **preExportSolution**: Called before each solution's exports begin
+- **parallelExportSolution**: Started alongside each solution's export workers. EXPORT waits for this hook to finish before unpacking and comparing that solution. With sequential export, the hook runs synchronously before the solution is exported.
+- **postExportSolution**: Called after each solution is unpacked and compared. With parallel export enabled, hooks for different solutions can run concurrently with remaining exports.
 - **postExport**: Called after exporting and unpacking solutions
 - **preBuild**: Called before packing solutions during the build process
 - **postBuild**: Called after packing solutions and copying assets
@@ -201,9 +364,15 @@ Each hook script receives a `$Context` parameter containing:
 - Additional context specific to the hook type:
   - **preBuild, postBuild**: `SourceDirectory`, `ArtifactStagingDirectory`
   - **preExport, postExport**: `SourceDirectory`, `ArtifactStagingDirectory`, `TempDirectory`, `EnvironmentName`
-  - **preDeploy, dataMigrations, postDeploy**: `ArtifactsPath`, `UseUnmanagedSolutions`
+  - **preExportSolution, parallelExportSolution, postExportSolution**: the export context above, plus `SolutionName`, `SolutionConfig`, and `SolutionIndex`
+  - Per-solution hooks also receive a cloned `Connection`. In parallel export mode, the hook worker sets that clone as its default connection for the duration of the hook, so existing Dataverse commands resolve to the right client. Hooks can also pass `$Context.Connection` explicitly. Parallel hooks receive the shared `OperationBudget` and `CancellationToken`.
+  - `postExportSolution` hook output is collected by solution in `SolutionHookResults` and passed to the `postExport` hook.
+  - `parallelExportSolution` hook output is collected by solution in `ParallelExportSolutionHookResults` and passed to the `postExport` hook.
+  - **preDeploy, dataMigrations, postDeploy**: `ArtifactsPath`, `UseUnmanagedSolutions`. The switch is true for IMPORT, which forces unmanaged packages; DEPLOY and BUILD validation leave it false, even when a solution is configured with `deployUnmanaged`.
 
 Start a hook with a parameter block. Resolve application-owned files from `$PSScriptRoot` or `$Context.BaseDirectory`, not from assumptions about the runner's working directory. Guard optional configuration keys when using strict mode:
+
+Per-solution hooks for different solutions may run concurrently when `export.parallel` is enabled. `parallelExportSolution` also runs concurrently with package exports for the same solution; EXPORT waits for it before unpacking. Keep hook side effects solution-scoped and use the provided `OperationBudget` for Dataverse operations. Hooks listed for a single phase run in their configured order; solution-to-solution completion order is not guaranteed. With sequential exports, all per-solution hooks run synchronously.
 
 ```powershell
 param([hashtable]$Context)

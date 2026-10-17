@@ -41,8 +41,8 @@ and environment-specific values are supplied at runtime.
 - PowerShell hooks for configuration data, schema migrations, organization settings, and other build/export/deployment tasks.
 - Pinned module/PAC dependencies, cache-aware installation, and a per-build dependency lock.
 - Optional PAC Solution Checker and deployment validation, including a retained release or last-deployed environment baseline.
-- Branch-specific development and promotion workflows, with platform-specific approval, permission, and concurrency controls.
-- GitHub Release assets, ordered manual promotion or environment protection, deployment pointers, and branch-aware Release cleanup.
+- Branch-specific development and deployment workflows, with platform-specific approval, permission, and concurrency controls.
+- Branch-suffixed GitHub BUILD releases, deployment pointers, and branch-aware Release cleanup.
 
 > [!IMPORTANT]
 > ALM4Dataverse does not provision Dataverse environments, replace functional testing,
@@ -84,6 +84,14 @@ extensions, service connections, target settings, and pipeline resource permissi
 4. Deploy that exact successful build to the first non-production target and verify application behavior.
 5. Promote the same build through later targets. Configure branch/PR policies separately if validation is required before merge.
 
+### AI-Assisted Application Changes
+
+New application repositories scaffolded from ALM4Dataverse include an
+[`AGENTS.md`](copy-to-your-repo/AGENTS.md) that tells coding agents which shared
+framework is in use and where its guides live. When asking an agent to add or update
+Dataverse components, have it read that file and the
+[guide to adding solutions, plug-ins, web resources, and Code Apps](docs/usage/adding-dataverse-components.md) first.
+
 ## Documentation
 
 ### Initial Setup
@@ -96,6 +104,7 @@ extensions, service connections, target settings, and pipeline resource permissi
 ### Usage Instructions
 
 - [Branching strategies](docs/usage/branching-strategies.md): choose development and promotion branches.
+- [Adding solutions, plug-ins, web resources, and Code Apps](docs/usage/adding-dataverse-components.md): add Dataverse components to configured solutions.
 - [Exporting changes](docs/usage/exporting-changes.md): capture maker changes and understand version increments.
 - [Building releases](docs/usage/building-releases.md): artifacts, checker reports, deployment validation, and retention.
 - [Deploying](docs/usage/deploying.md): select builds, promote, retry, redeploy, and plan recovery.

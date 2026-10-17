@@ -7,14 +7,24 @@
     solutions based on the provided parameter.
 
     It also sets connection references and environment variables based on environment
-    variables prefixed with "ConnRef_" and "EnvVar_" respectively.
+    variables prefixed with "DataverseConnRef_" and "DataverseEnvVar_" respectively.
 
     Hooks defined in alm-config.psd1 are invoked at various stages of the deployment
     process to allow for custom pre- and post-deployment actions.
 .PARAMETER ArtifactsPath
     The path to the artifacts containing the solutions to deploy.
 .PARAMETER UseUnmanagedSolutions
-    Switch to indicate whether to deploy unmanaged solutions instead of managed.
+    Forces unmanaged packages for every solution, overriding per-solution preferences.
+.NOTES
+    Requires installed dependencies and a default Dataverse connection. Reads
+    alm-config.psd1 from the artifacts root. Solutions must be listed in dependency
+    order. Stages packages, runs migrations, applies managed upgrades in reverse
+    order, then assigns/activates processes and publishes all customizations.
+    Service-account UPN comes from the configured environment-variable key (default
+    DataverseServiceAccountUpn); missing users/values fail after any earlier imports.
+    Deployment is not transactional and does not roll back earlier side effects.
+.EXAMPLE
+    .\pipelines\scripts\deploy.ps1 -ArtifactsPath .\artifacts
 #>
 
 param(
@@ -63,6 +73,7 @@ foreach ($solutionConfig in $solutionsConfig.solutions) {
         File = Join-Path -Path $ArtifactsPath -ChildPath solutions -AdditionalChildPath $fileName
         DeployUnmanaged = $deployUnmanaged
         ServiceAccountUpnConfigKey = $serviceAccountUpnKey
+        CodeApps = @(Get-SolutionCodeAppPath -Solution $solutionConfig -BaseDirectory $ArtifactsPath)
     }
 }
 $connectionReferences = @{}
@@ -81,7 +92,8 @@ Get-ChildItem Env: | Where-Object { $_.Name -like "DataverseEnvVar_*" } | ForEac
     $environmentVariables[$envVarName] = $_.Value
 }
 
-# Stage all solutions first (in dependency order)
+# Holding solutions keep old components available until every dependent package
+# is staged and dataMigrations has run; removal upgrades then run most-dependent first.
 Write-Host "##[section]Staging solutions"
 $importTimeoutSeconds = if ($null -ne $solutionsConfig.importTimeoutSeconds) { $solutionsConfig.importTimeoutSeconds } else { 10800 }
 $connectionReferences.GetEnumerator() | ForEach-Object {
@@ -165,7 +177,7 @@ foreach ($solution in $solutions) {
                 @{"solution.uniquename" = "$($solution.Name)"}
                 @{"or" = @(
                     @{ "statecode:NotEqual" = 1 } # Not Activated
-                    @{ "ownerid:NotEqual" = $serviceAccountUser.Id } # Activated
+                    @{ "ownerid:NotEqual" = $serviceAccountUser.Id } # Ownership also requires correction
                 )}
              )
         } `
@@ -175,6 +187,7 @@ foreach ($solution in $solutions) {
     if ($processes.Count -gt 0) {
         foreach ($process in $processes) {
             if ($process.ownerid -ne $serviceAccountUser.Id) {
+                # Deactivate before changing owner, then activate under the service account.
                 Write-Host "Reassigning process: $($process.name) to service account user: $($serviceAccountUser.fullname)"
 
                 Set-DataverseRecord `
@@ -205,6 +218,34 @@ Write-Host "##[endgroup]"
 # Publish all customizations
 Write-Host "##[section]Publishing Customizations"
 Publish-DataverseCustomizations
+
+foreach ($solution in $solutions) {
+    foreach ($codeAppPath in $solution.CodeApps) {
+        if ([string]::IsNullOrWhiteSpace($env:DATAVERSE_URL)) {
+            throw "DATAVERSE_URL is required to push code apps for solution '$($solution.Name)'. Connect to the target environment before deployment."
+        }
+
+        $pac = Get-Command pac -ErrorAction SilentlyContinue
+        if (-not $pac) {
+            throw 'Power Apps CLI (pac) was not found on PATH.'
+        }
+
+        Write-Host "##[group]Pushing code app for solution '$($solution.Name)' from '$codeAppPath'"
+        $pacArgs = @('code', 'push', '--environment', $env:DATAVERSE_URL, '--solutionName', $solution.Name)
+        Push-Location -LiteralPath $codeAppPath
+        try {
+            & $pac.Source @pacArgs
+            $pacExitCode = $LASTEXITCODE
+            if ($pacExitCode -ne 0) {
+                throw "PAC code push failed for solution '$($solution.Name)' with exit code $pacExitCode."
+            }
+        }
+        finally {
+            Pop-Location
+            Write-Host "##[endgroup]"
+        }
+    }
+}
 
 Invoke-Hook -HookType "postDeploy" -BaseDirectory $ArtifactsPath -Config $solutionsConfig -AdditionalContext @{
     ArtifactsPath = $ArtifactsPath
