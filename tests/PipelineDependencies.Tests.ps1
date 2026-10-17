@@ -64,7 +64,7 @@ Describe 'Dependency installation' {
             }
             [System.IO.File]::Exists($fullPath) -or [System.IO.Directory]::Exists($fullPath)
         }
-        Mock dotnet { $global:LASTEXITCODE = 0; 'microsoft.powerapps.cli.tool 2.7.4 pac' }
+        Mock dotnet { $global:LASTEXITCODE = 0; 'microsoft.powerapps.cli.tool 2.13.1 pac' }
         Push-Location $script:dependencyDirectory
     }
 

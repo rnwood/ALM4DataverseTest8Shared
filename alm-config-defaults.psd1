@@ -7,7 +7,7 @@
 
     # Power Apps CLI version used by pipeline scripts.
     # Supports: '' (latest stable), 'prerelease', or an exact version.
-    pacCliVersion = '2.7.4'
+    pacCliVersion = '2.13.1'
 
     # Node.js version required for BUILD/IMPORT when a solution configures codeApps.
     # Set a major version to use an installed compatible release or download the latest stable patch.

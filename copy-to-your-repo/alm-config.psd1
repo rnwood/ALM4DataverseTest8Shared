@@ -26,10 +26,14 @@
     # - serviceAccountUpnConfigKey: (optional) name of the environment configuration key containing
     #   the service account UPN to use when activating processes in this solution.
     #   The default is 'DataverseServiceAccountUpn'
-    # - codeApps: (optional) code app project paths relative to the repository root;
-    #   each project is built using npm ci / npm run build and pushed after deployment.
-    #   The pipeline identity also needs a suitable Power Platform API RBAC role;
-    #   Dataverse application-user permissions alone don't grant access to the push API.
+    # - codeApps: (optional) code app project paths relative to the repository root.
+    #   Each project is built using npm ci / npm run build. By default, built files
+    #   replace the existing Code App component in this solution before import, so
+    #   the app must already be included in the solution package. This avoids the
+    #   broader Power Platform API RBAC assignment required by PAC push.
+    # - codeAppPublishMethod: (optional, default 'solution') use 'pac' to push after
+    #   import with PAC CLI. This requires a suitable Power Platform API RBAC role;
+    #   Dataverse application-user permissions alone don't grant access to that API.
     # - solutionCheck: (optional) per-solution PAC checker settings merged with global solutionCheck
     #   settings below. Use enabled = $false to skip checker for a specific solution.
     solutions = @(
@@ -37,6 +41,7 @@
         # @{
         #   name = 'ContosoCore'
         #   codeApps = @('code-apps/customer-portal')
+        #   codeAppPublishMethod = 'solution' # Or 'pac' when the identity has API RBAC access
         #   mappings = @(
         #     @{
         #       type = 'FileToFile'
@@ -198,7 +203,7 @@
     # Power Apps CLI version used by pipeline scripts.
     # Optional override. Defaults from ALM4Dataverse are used when omitted.
     # Supports: '' (latest stable), 'prerelease', or a specific version.
-    # pacCliVersion = '2.7.4'
+    # pacCliVersion = '2.13.1'
 
     # Timeout in seconds for each solution import operation (default: 10800).
     # Increase this value if solution imports time out in large or complex environments.

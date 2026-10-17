@@ -215,11 +215,14 @@ repository-relative project path to the owning solution's `codeApps` setting:
 ```
 
 BUILD and IMPORT install dependencies and run each app's build before packaging it.
-DEPLOY and IMPORT then publish the app with `pac code push` to its owning solution and
-target environment; no custom push hook is needed. Keep code app projects out of
-`assets`.
+By default, DEPLOY and IMPORT patch the built files into the app's existing component in
+the owning solution before importing it. The Code App must already be included as a root
+component in that solution; otherwise deployment fails before any solution is imported.
+Set `codeAppPublishMethod = 'pac'` to use `pac code push` after import instead. Keep code
+app projects out of `assets`.
 
-The pipeline identity also needs Power Platform API access; Dataverse permissions alone
-aren't sufficient. See [solution settings](../config/alm-config.md#solutions) for access
-requirements and project details, and [Node.js for Code Apps](../config/alm-config.md#nodejs-for-code-apps)
-for version selection and conditional installation.
+The PAC method requires Power Platform API RBAC access; Dataverse permissions alone
+aren't sufficient. The solution-package default avoids this broader permission
+requirement. See [solution settings](../config/alm-config.md#solutions) for details and
+[Node.js for Code Apps](../config/alm-config.md#nodejs-for-code-apps) for version
+selection and conditional installation.

@@ -23,6 +23,9 @@
     Service-account UPN comes from the configured environment-variable key (default
     DataverseServiceAccountUpn); missing users/values fail after any earlier imports.
     Deployment is not transactional and does not roll back earlier side effects.
+    Code apps are patched into existing solution components by default before imports.
+    Setting codeAppPublishMethod to 'pac' retains the PAC push path and its Power
+    Platform API RBAC requirements.
 .EXAMPLE
     .\pipelines\scripts\deploy.ps1 -ArtifactsPath .\artifacts
 #>
@@ -68,14 +71,38 @@ foreach ($solutionConfig in $solutionsConfig.solutions) {
         $serviceAccountUpnKey = $solutionConfig.serviceAccountUpnConfigKey
     }
 
+    $codeAppPublishMethod = 'solution'
+    if ($solutionConfig.ContainsKey('codeAppPublishMethod') -and
+        -not [string]::IsNullOrWhiteSpace([string]$solutionConfig.codeAppPublishMethod)) {
+        $codeAppPublishMethod = ([string]$solutionConfig.codeAppPublishMethod).Trim().ToLowerInvariant()
+    }
+    if ($codeAppPublishMethod -notin @('solution', 'pac')) {
+        throw "Solution '$($solutionConfig.name)' codeAppPublishMethod '$codeAppPublishMethod' is invalid. Use 'solution' or 'pac'."
+    }
+
     $solutions += @{
         Name = $solutionConfig.name
         File = Join-Path -Path $ArtifactsPath -ChildPath solutions -AdditionalChildPath $fileName
         DeployUnmanaged = $deployUnmanaged
         ServiceAccountUpnConfigKey = $serviceAccountUpnKey
         CodeApps = @(Get-SolutionCodeAppPath -Solution $solutionConfig -BaseDirectory $ArtifactsPath)
+        CodeAppPublishMethod = $codeAppPublishMethod
     }
 }
+
+Write-Host "##[section]Preparing Code App solution packages"
+foreach ($solution in $solutions) {
+    if ($solution.CodeAppPublishMethod -ne 'solution') {
+        continue
+    }
+    foreach ($codeAppPath in $solution.CodeApps) {
+        Update-SolutionCodeAppPackage `
+            -SolutionFile $solution.File `
+            -CodeAppPath $codeAppPath `
+            -SolutionName $solution.Name
+    }
+}
+
 $connectionReferences = @{}
 
 # Find all env vars prefixed with "DataverseConnRef_" to set as connection references
@@ -220,6 +247,9 @@ Write-Host "##[section]Publishing Customizations"
 Publish-DataverseCustomizations
 
 foreach ($solution in $solutions) {
+    if ($solution.CodeAppPublishMethod -ne 'pac' -or $solution.CodeApps.Count -eq 0) {
+        continue
+    }
     foreach ($codeAppPath in $solution.CodeApps) {
         if ([string]::IsNullOrWhiteSpace($env:DATAVERSE_URL)) {
             throw "DATAVERSE_URL is required to push code apps for solution '$($solution.Name)'. Connect to the target environment before deployment."
