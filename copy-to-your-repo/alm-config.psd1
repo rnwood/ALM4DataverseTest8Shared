@@ -28,6 +28,8 @@
     #   The default is 'DataverseServiceAccountUpn'
     # - codeApps: (optional) code app project paths relative to the repository root;
     #   each project is built using npm ci / npm run build and pushed after deployment.
+    #   The pipeline identity also needs a suitable Power Platform API RBAC role;
+    #   Dataverse application-user permissions alone don't grant access to the push API.
     # - solutionCheck: (optional) per-solution PAC checker settings merged with global solutionCheck
     #   settings below. Use enabled = $false to skip checker for a specific solution.
     solutions = @(

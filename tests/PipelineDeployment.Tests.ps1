@@ -150,6 +150,27 @@ Describe 'Deployment options' {
         }
     }
 
+    It 'fails and includes PAC output when its API request fails despite a zero exit code' {
+        $codeAppPath = Join-Path $TestDrive 'apps/Portal'
+        New-Item -ItemType Directory -Path $codeAppPath -Force | Out-Null
+        Write-DeploymentConfig -Settings "codeApps = @('apps/Portal')"
+        $savedDataverseUrl = $env:DATAVERSE_URL
+        $env:DATAVERSE_URL = 'https://example.crm.dynamics.com'
+        Mock Get-Command { [pscustomobject]@{ Source = 'Invoke-DeploymentTestPac' } } -ParameterFilter { $Name -eq 'pac' }
+        Mock Invoke-DeploymentTestPac {
+            $global:LASTEXITCODE = 0
+            'HTTP error status: 403 for POST https://example.environment.api.powerplatform.com/powerapps/apps?api-version=1: Forbidden'
+        }
+
+        try {
+            { & $script:deployScript -ArtifactsPath $TestDrive } |
+                Should -Throw '*HTTP error status: 403*'
+        }
+        finally {
+            $env:DATAVERSE_URL = $savedDataverseUrl
+        }
+    }
+
     It 'selects package and service-account defaults for <Label>' -ForEach @(
         @{ Label = 'missing keys'; Settings = ''; Unmanaged = $false; Package = 'Example_managed.zip'; Upn = 'default@example.com' }
         @{ Label = 'per-solution overrides'; Settings = "deployUnmanaged = `$true; serviceAccountUpnConfigKey = 'CustomUpn'"; Unmanaged = $false; Package = 'Example.zip'; Upn = 'custom@example.com' }

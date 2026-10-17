@@ -234,10 +234,20 @@ foreach ($solution in $solutions) {
         $pacArgs = @('code', 'push', '--environment', $env:DATAVERSE_URL, '--solutionName', $solution.Name)
         Push-Location -LiteralPath $codeAppPath
         try {
-            & $pac.Source @pacArgs
+            $pacOutput = @(& $pac.Source @pacArgs 2>&1)
             $pacExitCode = $LASTEXITCODE
-            if ($pacExitCode -ne 0) {
-                throw "PAC code push failed for solution '$($solution.Name)' with exit code $pacExitCode."
+            $pacOutputText = ($pacOutput | ForEach-Object { [string]$_ }) -join "`n"
+            $apiRequestFailed = $pacOutputText -match '(?im)HTTP error status:\s*[45]\d{2}\s+for\s+(GET|POST|PUT|PATCH|DELETE)\s+https?://\S*/powerapps/'
+            if ($pacExitCode -ne 0 -or $apiRequestFailed) {
+                $failureMessage = "PAC code push failed for solution '$($solution.Name)' with exit code $pacExitCode."
+                if ($apiRequestFailed -and $pacExitCode -eq 0) {
+                    $failureMessage += ' PAC reported an API request failure despite returning success.'
+                }
+                $failureMessage += "`nPAC output:`n$pacOutputText"
+                throw $failureMessage
+            }
+            foreach ($line in $pacOutput) {
+                Write-Host ([string]$line)
             }
         }
         finally {

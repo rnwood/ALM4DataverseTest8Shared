@@ -219,6 +219,7 @@ DEPLOY and IMPORT then publish the app with `pac code push` to its owning soluti
 target environment; no custom push hook is needed. Keep code app projects out of
 `assets`.
 
-See [solution settings](../config/alm-config.md#solutions) for project requirements and
-the [Node.js for Code Apps](../config/alm-config.md#nodejs-for-code-apps) reference for
-version selection and conditional installation details.
+The pipeline identity also needs Power Platform API access; Dataverse permissions alone
+aren't sufficient. See [solution settings](../config/alm-config.md#solutions) for access
+requirements and project details, and [Node.js for Code Apps](../config/alm-config.md#nodejs-for-code-apps)
+for version selection and conditional installation.

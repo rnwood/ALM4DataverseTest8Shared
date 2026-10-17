@@ -121,6 +121,13 @@ solutions = @(
 - `solutionCheck` (optional): Per-solution PAC checker settings merged with global `solutionCheck` settings (see below). Set `solutionCheck.enabled = $false` to skip checking a specific solution.
 - `mappings` (optional): Ordered SolutionPackager mapping entries used during BUILD and EXPORT; each entry may include the build command that produces its source during BUILD; see [Build Processing](#build-processing).
 
+Code app publishing also calls the Power Platform API. The pipeline identity must be
+authorized for that API and the target environment; Dataverse application-user security
+roles alone don't grant access to the code-app push API. For service principals, assign an
+appropriate Power Platform API RBAC role (rather than relying on Entra application
+permissions alone), following Microsoft's [authentication guidance](https://learn.microsoft.com/en-us/power-platform/admin/programmability-authentication-v2)
+and [RBAC role assignment tutorial](https://learn.microsoft.com/en-us/power-platform/admin/programmability-tutorial-rbac-role-assignment).
+
 `BUILD` packs both managed and unmanaged packages. `DEPLOY` selects the package using `deployUnmanaged`; `IMPORT` always selects unmanaged packages for every solution. Use managed deployment for controlled downstream environments unless you have a specific reason to retain unmanaged customizations.
 
 BUILD and IMPORT install locked dependencies and run each configured app's
