@@ -166,7 +166,7 @@ Describe 'PAC authentication' {
     It 'selects an existing profile when creation fails' {
         Mock Invoke-TestPac { $global:LASTEXITCODE = 1; 'Profile exists' } -ParameterFilter { $Operation -eq 'create' }
         Initialize-PacAuthentication -Quiet -Url 'https://example.crm.dynamics.com'
-        Should -Invoke Invoke-TestPac -Times 1 -Exactly -ParameterFilter { $Operation -eq 'select' }
+        Should -Invoke Invoke-TestPac -Times 1 -Exactly -ParameterFilter { $Area -eq 'auth' -and $Operation -eq 'select' }
         Should -Invoke Invoke-TestPac -Times 1 -Exactly -ParameterFilter {
             $Area -eq 'env' -and $Operation -eq 'select' -and
             $args -contains 'https://example.crm.dynamics.com'
