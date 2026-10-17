@@ -74,7 +74,7 @@ function Get-NodeVersionFromCommand {
     return [version]$Matches[1]
 }
 
-function Test-NodeVersionMatches {
+function Test-NodeVersionMatch {
     param(
         [Parameter(Mandatory = $true)]
         [version]$InstalledVersion,
@@ -127,7 +127,7 @@ function Install-ConfiguredNodeVersion {
     $existingNode = Get-Command node -ErrorAction SilentlyContinue
     if ($existingNode) {
         $existingVersion = Get-NodeVersionFromCommand -CommandPath $existingNode.Source
-        if ($existingVersion -and (Test-NodeVersionMatches -InstalledVersion $existingVersion -VersionSpecifier $trimmedSpecifier)) {
+        if ($existingVersion -and (Test-NodeVersionMatch -InstalledVersion $existingVersion -VersionSpecifier $trimmedSpecifier)) {
             if (Get-Command npm -ErrorAction SilentlyContinue) {
                 Write-Host "Using existing Node.js $existingVersion and npm"
                 return
@@ -220,7 +220,7 @@ function Install-ConfiguredNodeVersion {
     }
 
     $installedNodeVersion = Get-NodeVersionFromCommand -CommandPath $nodeExecutable
-    if (-not $installedNodeVersion -or -not (Test-NodeVersionMatches -InstalledVersion $installedNodeVersion -VersionSpecifier $trimmedSpecifier)) {
+    if (-not $installedNodeVersion -or -not (Test-NodeVersionMatch -InstalledVersion $installedNodeVersion -VersionSpecifier $trimmedSpecifier)) {
         throw "Installed Node.js version '$installedNodeVersion' does not satisfy nodeVersion '$VersionSpecifier'."
     }
 
