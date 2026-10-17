@@ -140,7 +140,7 @@ function Install-ConfiguredNodeVersion {
     if (Test-Path -LiteralPath $nodeRoot -PathType Container) {
         foreach ($cachedDirectory in Get-ChildItem -LiteralPath $nodeRoot -Directory) {
             if ($cachedDirectory.Name -match ('^v' + $versionMajor + '\.(\d+)\.(\d+)-' + [regex]::Escape($platform) + '$')) {
-                $cachedVersion = [version]($cachedDirectory.Name -replace ('-' + [regex]::Escape($platform) + '$'), '')
+                $cachedVersion = [version](($cachedDirectory.Name -replace ('-' + [regex]::Escape($platform) + '$'), '') -replace '^v', '')
                 $cachedNodePath = Join-Path $cachedDirectory.FullName $(if ($IsWindows) { 'node.exe' } else { 'bin/node' })
                 if (Test-Path -LiteralPath $cachedNodePath -PathType Leaf) {
                     $cachedVersions += [pscustomobject]@{ Version = $cachedVersion; Directory = $cachedDirectory.FullName; NodePath = $cachedNodePath }

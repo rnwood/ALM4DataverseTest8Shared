@@ -724,13 +724,17 @@ function Write-AlmBuildVersionInfo {
             Creates or selects a PAC profile using the existing Azure identity context.
         .DESCRIPTION
             Requires PAC on PATH and a non-interactive Azure sign-in context.
+            When Url is provided, creates the profile for that environment and selects it as active.
             If profile creation fails, tries selection before validating auth who.
             Throws when neither setup path succeeds or identity validation fails.
+        .PARAMETER Url
+            Optional Dataverse environment URL to associate with and select in the PAC profile.
         .PARAMETER Quiet
             Suppresses auth who output, not group markers or authentication errors.
         #>
         param(
             [string]$ProfileName = 'ALM4Dataverse-SolutionCheck',
+            [string]$Url = '',
             [switch]$Quiet
         )
 
@@ -744,6 +748,9 @@ function Write-AlmBuildVersionInfo {
         Write-Host "##[group]Authenticating Power Apps CLI using managed identity / Azure identity context"
 
         $createArgs = @('auth', 'create', '--managedIdentity', '--name', $ProfileName)
+        if (-not [string]::IsNullOrWhiteSpace($Url)) {
+            $createArgs += @('--environment', $Url)
+        }
         $createOutput = @(& $pacPath @createArgs 2>&1)
         $createExitCode = $LASTEXITCODE
 
@@ -762,6 +769,14 @@ function Write-AlmBuildVersionInfo {
                     "pac auth select output:",
                     $selectText
                 ) -join "`n"
+            }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($Url)) {
+            $environmentOutput = @(& $pacPath env select --environment $Url 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                $environmentText = ($environmentOutput | ForEach-Object { [string]$_ }) -join "`n"
+                throw "PAC environment selection failed for '$Url'.`n$environmentText"
             }
         }
 

@@ -5,6 +5,27 @@ BeforeAll {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Mock command signature; Pester inspects these arguments.')]
         param($Verb, $Operation, $PackageName)
     }
+    function Get-TestNodeLink {
+        param(
+            [Parameter(Mandatory)][string]$Path,
+            [Parameter(Mandatory)][string]$Target
+        )
+
+        $itemType = if ($IsWindows) { 'HardLink' } else { 'SymbolicLink' }
+        New-Item -ItemType $itemType -Path $Path -Target $Target | Out-Null
+    }
+    function Get-TestNodeRuntime {
+        $nodeCommand = Get-Command node -ErrorAction Stop
+        $versionOutput = @(& $nodeCommand.Source --version 2>&1)
+        if ($LASTEXITCODE -ne 0 -or $versionOutput.Count -ne 1 -or $versionOutput[0] -notmatch '^v(\d+\.\d+\.\d+)$') {
+            throw 'A working Node.js command is required for dependency tests.'
+        }
+
+        [pscustomobject]@{
+            Path = $nodeCommand.Source
+            Version = [version]$Matches[1]
+        }
+    }
 }
 
 Describe 'Dependency installation' {
@@ -16,6 +37,7 @@ Describe 'Dependency installation' {
             GITHUB_PATH = $env:GITHUB_PATH
             TF_BUILD = $env:TF_BUILD
         }
+        $script:savedHome = $HOME
         $script:savedExitCode = $global:LASTEXITCODE
         $script:dependencyDirectory = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $script:dependencyDirectory -Force | Out-Null
@@ -51,6 +73,7 @@ Describe 'Dependency installation' {
         foreach ($name in $script:savedEnvironment.Keys) {
             [Environment]::SetEnvironmentVariable($name, $script:savedEnvironment[$name])
         }
+        Set-Variable -Name HOME -Value $script:savedHome -Scope Global -Force
         $global:LASTEXITCODE = $script:savedExitCode
     }
 
@@ -106,6 +129,41 @@ Describe 'Dependency installation' {
         Mock Invoke-WebRequest {}
 
         { & (Join-Path $repoRoot 'pipelines/scripts/installdependencies.ps1') -ForBuild } | Should -Throw '*nodeVersion*invalid*'
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+    }
+
+    It 'uses an installed Node version matching the configured <VersionKind>' -ForEach @(
+        @{ VersionKind = 'major' }
+        @{ VersionKind = 'exact version' }
+    ) {
+        $nodeRuntime = Get-TestNodeRuntime
+        $versionSpecifier = if ($VersionKind -eq 'major') { [string]$nodeRuntime.Version.Major } else { $nodeRuntime.Version.ToString() }
+        Set-Variable -Name HOME -Value $script:dependencyDirectory -Scope Global -Force
+        New-Item -ItemType Directory -Path (Join-Path $script:dependencyDirectory 'apps/code') -Force | Out-Null
+        Set-Content -LiteralPath 'alm-config.psd1' -Value "@{ nodeVersion = '$versionSpecifier'; solutions = @(@{ name = 'Contoso'; codeApps = @('apps/code') }) }"
+        Mock Get-Command { [pscustomobject]@{ Source = $nodeRuntime.Path } } -ParameterFilter { $Name -eq 'node' }
+        Mock Get-Command { [pscustomobject]@{ Source = 'npm' } } -ParameterFilter { $Name -eq 'npm' }
+        Mock Invoke-WebRequest {}
+
+        { & (Join-Path $repoRoot 'pipelines/scripts/installdependencies.ps1') -ForBuild } | Should -Not -Throw
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+    }
+
+    It 'uses the newest cached Node version when the existing Node command is invalid' {
+        $nodeRuntime = Get-TestNodeRuntime
+        $platform = if ($IsWindows) { 'win-x64' } else { 'linux-x64' }
+        $cachedDirectory = Join-Path $script:dependencyDirectory ".alm4dataverse/tools/node/v$($nodeRuntime.Version)-$platform"
+        $cachedNodePath = Join-Path $cachedDirectory $(if ($IsWindows) { 'node.exe' } else { 'bin/node' })
+        Set-Variable -Name HOME -Value $script:dependencyDirectory -Scope Global -Force
+        New-Item -ItemType Directory -Path (Join-Path $script:dependencyDirectory 'apps/code'), (Split-Path -Parent $cachedNodePath) -Force | Out-Null
+        Get-TestNodeLink -Path $cachedNodePath -Target $nodeRuntime.Path
+        Set-Content -LiteralPath 'alm-config.psd1' -Value "@{ nodeVersion = '$($nodeRuntime.Version.Major)'; solutions = @(@{ name = 'Contoso'; codeApps = @('apps/code') }) }"
+        Mock Get-Command { [pscustomobject]@{ Source = 'pwsh' } } -ParameterFilter { $Name -eq 'node' }
+        Mock Invoke-WebRequest {}
+
+        { & (Join-Path $repoRoot 'pipelines/scripts/installdependencies.ps1') -ForBuild } | Should -Not -Throw
+        (Get-Content -LiteralPath $env:GITHUB_PATH -Raw) -split "`r?`n" |
+            Should -Contain (Split-Path -Parent $cachedNodePath)
         Should -Invoke Invoke-WebRequest -Times 0 -Exactly
     }
 
