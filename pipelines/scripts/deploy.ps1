@@ -119,7 +119,7 @@ if ($packageDeployerEnabled -and -not $UseUnmanagedSolutions -and -not $insidePa
         }
     }
 
-    $pacArguments = @('package', 'deploy', '--package', $packagePath, '--environment', $targetEnvironment)
+    $pacArguments = @('package', 'deploy', '--package', $packagePath, '--environment', $targetEnvironment, '--logConsole')
     if ($settingsEntries.Count -gt 0) {
         $pacArguments += @('--settings', ($settingsEntries -join '|'))
     }
