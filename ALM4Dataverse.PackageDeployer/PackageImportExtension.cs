@@ -166,6 +166,10 @@ namespace ALM4Dataverse.PackageDeployer
             {
                 using (var ps = PowerShell.Create())
                 {
+                    ps.AddCommand("Import-Module")
+                        .AddParameter("Name", "Microsoft.PowerShell.Utility")
+                        .AddParameter("ErrorAction", ActionPreference.Stop);
+                    ps.AddStatement();
                     ps.AddCommand("Set-Location").AddParameter("Path", workingDirectory);
                     ps.AddStatement();
                     ps.AddScript(script);
