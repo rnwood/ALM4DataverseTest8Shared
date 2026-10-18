@@ -1295,13 +1295,59 @@ if ($packageDeployerEnabled) {
                 finally {
                     $importConfigReader.Dispose()
                 }
-                $solutionImports = $importConfigDocument.DocumentElement.SelectSingleNode('solutions')
-                if ($null -eq $solutionImports -or $solutionImports.ChildNodes.Count -eq 0) {
+                $solutionImports = $importConfigDocument.DocumentElement.SelectNodes('solutions/configsolutionfile')
+                if ($solutionImports.Count -eq 0) {
                     throw "Package Deployer package '$pdpkgZip' does not define any solution imports in PkgAssets/ImportConfig.xml."
                 }
 
                 if (-not ($zipEntryNames -contains 'PkgAssets/manifest.ppkg.json')) {
                     throw "Package Deployer package '$pdpkgZip' is missing PkgAssets/manifest.ppkg.json."
+                }
+            }
+            finally {
+                $packageZip.Dispose()
+            }
+
+            $packageZip = [System.IO.Compression.ZipFile]::Open($pdpkgZip, [System.IO.Compression.ZipArchiveMode]::Update)
+            try {
+                $assetsImportConfigEntry = $packageZip.GetEntry('PkgAssets/ImportConfig.xml')
+                $rootImportConfigEntry = $packageZip.GetEntry('ImportConfig.xml')
+                if ($null -ne $rootImportConfigEntry) {
+                    $rootImportConfigEntry.Delete()
+                }
+                $rootImportConfigEntry = $packageZip.CreateEntry('ImportConfig.xml')
+                $assetsImportConfigStream = $assetsImportConfigEntry.Open()
+                $rootImportConfigStream = $rootImportConfigEntry.Open()
+                try {
+                    $assetsImportConfigStream.CopyTo($rootImportConfigStream)
+                }
+                finally {
+                    $assetsImportConfigStream.Dispose()
+                    $rootImportConfigStream.Dispose()
+                }
+            }
+            finally {
+                $packageZip.Dispose()
+            }
+
+            $packageZip = [System.IO.Compression.ZipFile]::OpenRead($pdpkgZip)
+            try {
+                $rootImportConfigEntry = $packageZip.GetEntry('ImportConfig.xml')
+                if ($null -eq $rootImportConfigEntry) {
+                    throw "Package Deployer package '$pdpkgZip' is missing ImportConfig.xml at the archive root."
+                }
+
+                $rootImportConfigStream = $rootImportConfigEntry.Open()
+                $rootImportConfigReader = [System.IO.StreamReader]::new($rootImportConfigStream)
+                try {
+                    [xml]$rootImportConfigDocument = $rootImportConfigReader.ReadToEnd()
+                }
+                finally {
+                    $rootImportConfigReader.Dispose()
+                }
+                $rootSolutionImports = $rootImportConfigDocument.DocumentElement.SelectNodes('solutions/configsolutionfile')
+                if ($rootSolutionImports.Count -eq 0) {
+                    throw "Package Deployer package '$pdpkgZip' does not define any solution imports in root ImportConfig.xml."
                 }
             }
             finally {
