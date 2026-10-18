@@ -36,7 +36,6 @@ public static class AlmBuildMappingTestCapture
 
 Describe 'Build artifacts and solution-check helpers' {
     BeforeEach {
-        $global:AlmBuildTestForEachObjectCommand = Microsoft.PowerShell.Core\Get-Command -Name 'ForEach-Object' -CommandType Cmdlet
         $script:savedEnvironment = @{
             GITHUB_STEP_SUMMARY             = $env:GITHUB_STEP_SUMMARY
             TF_BUILD                        = $env:TF_BUILD
@@ -113,18 +112,13 @@ Describe 'Build artifacts and solution-check helpers' {
         # Most cases keep work in Pester's runspace so mocks remain visible. Both overlap cases
         # opt out and supply an importable pack module to exercise actual worker isolation.
         Mock ForEach-Object {
-            $InputObject | & $global:AlmBuildTestForEachObjectCommand -Process $Process
+            $InputObject | Microsoft.PowerShell.Core\ForEach-Object -Process $Process
         } -ParameterFilter { $null -eq $Parallel }
         Mock ForEach-Object {
-            if ($env:ALM_BUILD_TEST_REAL_PARALLEL -eq 'true') {
-                $InputObject | & $global:AlmBuildTestForEachObjectCommand -ThrottleLimit $ThrottleLimit -Parallel $Parallel
+            if ($null -ne $Parallel -and $null -ne $InputObject -and $InputObject.PSObject.Properties['CommandName']) {
+                $env:ALM_BUILD_TEST_PARALLEL_COMMAND_STAGE = 'true'
             }
-            else {
-                if ($null -ne $Parallel -and $null -ne $InputObject -and $InputObject.PSObject.Properties['CommandName']) {
-                    $env:ALM_BUILD_TEST_PARALLEL_COMMAND_STAGE = 'true'
-                }
-                $InputObject | & $global:AlmBuildTestForEachObjectCommand -Process $Parallel
-            }
+            $InputObject | Microsoft.PowerShell.Core\ForEach-Object -Process $Parallel
         } -ParameterFilter { $null -ne $Parallel -and $env:ALM_BUILD_TEST_REAL_PARALLEL -ne 'true' }
     }
 
@@ -135,7 +129,6 @@ Describe 'Build artifacts and solution-check helpers' {
         $global:LASTEXITCODE = $script:savedExitCode
         Remove-Variable -Name ALM_BUILD_TEST_PAC_PACK_ARGUMENTS -Scope Global -ErrorAction SilentlyContinue
         Remove-Variable -Name ALM_BUILD_TEST_CAPTURED_MAPPING_PATH, ALM_BUILD_TEST_CAPTURED_MAPPING_XML -Scope Global -ErrorAction SilentlyContinue
-        Remove-Variable -Name AlmBuildTestForEachObjectCommand -Scope Global -ErrorAction SilentlyContinue
     }
 
     It 'packs solutions, copies assets/configuration, and locks actual installed versions' {
