@@ -218,6 +218,38 @@ function Merge-AlmConfigValue {
     return $OverrideValue
 }
 
+function ConvertTo-AlmConfigLogValue {
+    <#
+    .SYNOPSIS
+        Replaces executable configuration values before diagnostic serialization.
+    .DESCRIPTION
+        Recursively preserves hashtable and array contents while rendering scriptblocks
+        as markers, avoiding serialization of their executable PowerShell internals.
+    #>
+    param($Value)
+
+    if ($Value -is [scriptblock]) {
+        return '[ScriptBlock]'
+    }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $sanitized = @{}
+        foreach ($key in $Value.Keys) {
+            $sanitized[$key] = ConvertTo-AlmConfigLogValue -Value $Value[$key]
+        }
+        return ,$sanitized
+    }
+    if ($Value -is [array]) {
+        $sanitized = @(
+            foreach ($item in $Value) {
+                ConvertTo-AlmConfigLogValue -Value $item
+            }
+        )
+        return ,$sanitized
+    }
+
+    return $Value
+}
+
 function Get-AlmConfig {
     <#
     .SYNOPSIS
@@ -273,9 +305,293 @@ function Get-AlmConfig {
     $config["_main"] = $mainConfig
     $config["_defaults"] = $defaultConfig
 
-    if ($LogConfig) { Write-Host "##[debug]Loaded configuration: $($config | ConvertTo-Json -Depth 20)" }
+    if ($LogConfig) {
+        $sanitizedConfig = ConvertTo-AlmConfigLogValue -Value $config
+        Write-Host "##[debug]Loaded configuration: $($sanitizedConfig | ConvertTo-Json -Depth 20)"
+    }
 
     return $config
+}
+
+function Resolve-ConfiguredSettingMap {
+    <#
+    .SYNOPSIS
+        Resolves one configured setting map into a PowerShell object.
+    .DESCRIPTION
+        Scriptblock values receive the deployment context and must emit one value.
+        Imported PSD1 scriptblocks are unwrapped once before their body is evaluated.
+        Invalid maps or scriptblock output stop deployment.
+    .PARAMETER Settings
+        Hashtable mapping setting names to static values or scriptblocks.
+    .PARAMETER SettingMapName
+        Configuration key used to identify scriptblock failures.
+    .PARAMETER Context
+        Deployment context supplied as the scriptblock's positional argument.
+    #>
+    param(
+        $Settings,
+        [Parameter(Mandatory = $true)]
+        [string]$SettingMapName,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Context
+    )
+
+    if ($null -eq $Settings) {
+        return
+    }
+    if ($Settings -isnot [hashtable]) {
+        $settingType = $Settings.GetType().FullName
+        throw "Setting map '$SettingMapName' must be a hashtable; received '$settingType'."
+    }
+    if ($Settings.Count -eq 0) {
+        return
+    }
+
+    $resolvedSettings = [ordered]@{}
+    foreach ($settingName in $Settings.Keys) {
+        $value = $Settings[$settingName]
+        if ($value -is [scriptblock]) {
+            $output = @(& $value $Context)
+            if ($output.Count -eq 1 -and $output[0] -is [scriptblock]) {
+                $output = @(& $output[0] $Context)
+            }
+            if ($output.Count -ne 1) {
+                throw "Scriptblock for setting '$settingName' in '$SettingMapName' must emit exactly one value; emitted $($output.Count)."
+            }
+            $value = $output[0]
+        }
+
+        $resolvedSettings[$settingName] = $value
+    }
+
+    return [PSCustomObject]$resolvedSettings
+}
+
+function Invoke-ConfiguredOrganizationSettingMap {
+    <#
+    .SYNOPSIS
+        Resolves and applies one configured organization-settings map.
+    .DESCRIPTION
+        OrgDbOrgSettings maps use the dedicated cmdlet parameter; all other maps
+        update organization-table columns. Cmdlet errors stop deployment without
+        rolling back any earlier setting updates.
+    .PARAMETER Settings
+        Hashtable mapping organization setting names to static values or scriptblocks.
+    .PARAMETER SettingMapName
+        Configuration key identifying this map and any resolution errors.
+    .PARAMETER Context
+        Deployment context supplied to configured scriptblocks.
+    .PARAMETER OrgDbOrgSettings
+        Applies the map as OrgDbOrgSettings rather than organization-table columns.
+    #>
+    param(
+        $Settings,
+        [Parameter(Mandatory = $true)]
+        [string]$SettingMapName,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Context,
+        [switch]$OrgDbOrgSettings
+    )
+
+    $inputObject = Resolve-ConfiguredSettingMap -Settings $Settings -SettingMapName $SettingMapName -Context $Context
+    if ($null -eq $inputObject) {
+        return
+    }
+
+    if ($OrgDbOrgSettings) {
+        Set-DataverseOrganizationSettings -OrgDbOrgSettings -Verbose -Confirm:$false -InputObject $inputObject
+    }
+    else {
+        # The cmdlet resolves organization attributes by case-sensitive logical name.
+        $logicalSettings = [ordered]@{}
+        foreach ($setting in $inputObject.PSObject.Properties) {
+            $logicalSettings[$setting.Name.ToLowerInvariant()] = $setting.Value
+        }
+        $logicalInputObject = [PSCustomObject]$logicalSettings
+        Set-DataverseOrganizationSettings -Verbose -Confirm:$false -InputObject $logicalInputObject
+    }
+}
+
+function Get-DefaultAzureCredentialAccessToken {
+    <#
+    .SYNOPSIS
+        Gets an access token through the Dataverse module's DefaultAzureCredential.
+    .DESCRIPTION
+        Loads the Azure.Identity dependencies shipped with the Dataverse PowerShell
+        module and uses the same default credential chain as Get-DataverseConnection.
+        This supports workload identity federation as well as other configured Azure
+        identities. Tokens are not written to logs.
+    #>
+    param()
+
+    if ($null -eq ('Azure.Identity.DefaultAzureCredential' -as [type])) {
+        $dataverseCommand = Get-Command -Name 'Get-DataverseConnection' -ErrorAction Stop
+        $assemblyDirectory = Split-Path -Parent $dataverseCommand.ImplementingType.Assembly.Location
+        if ($null -eq ('Azure.Core.TokenRequestContext' -as [type])) {
+            Add-Type -Path (Join-Path $assemblyDirectory 'Azure.Core.dll') -ErrorAction Stop
+        }
+        Add-Type -Path (Join-Path $assemblyDirectory 'Azure.Identity.dll') -ErrorAction Stop
+    }
+
+    $credential = [Azure.Identity.DefaultAzureCredential]::new()
+    try {
+        $context = [Azure.Core.TokenRequestContext]::new([string[]]@('https://api.powerplatform.com/.default'))
+        $token = $credential.GetToken($context, [System.Threading.CancellationToken]::None)
+        if ([string]::IsNullOrWhiteSpace([string]$token.Token)) {
+            throw 'DefaultAzureCredential returned no Power Platform API access token.'
+        }
+        return [string]$token.Token
+    }
+    finally {
+        $credential.Dispose()
+    }
+}
+
+function Get-PowerPlatformApiAccessToken {
+    <#
+    .SYNOPSIS
+        Gets a Power Platform API bearer token for the active pipeline identity.
+    .DESCRIPTION
+        Uses the configured service-principal secret when available; otherwise uses
+        the Dataverse module's DefaultAzureCredential chain, including workload
+        identity federation. Tokens are requested for the Power Platform API and
+        are not written to logs.
+    #>
+    param()
+
+    $clientId = [System.Environment]::GetEnvironmentVariable('AZURE_CLIENT_ID')
+    $tenantId = [System.Environment]::GetEnvironmentVariable('AZURE_TENANT_ID')
+    $clientSecret = [System.Environment]::GetEnvironmentVariable('AZURE_CLIENT_SECRET')
+
+    if (-not [string]::IsNullOrWhiteSpace($clientSecret)) {
+        if ([string]::IsNullOrWhiteSpace($clientId) -or [string]::IsNullOrWhiteSpace($tenantId)) {
+            throw 'AZURE_CLIENT_ID and AZURE_TENANT_ID are required when AZURE_CLIENT_SECRET is set.'
+        }
+
+        $tenant = [System.Uri]::EscapeDataString($tenantId)
+        $tokenResponse = Invoke-RestMethod `
+            -Uri "https://login.microsoftonline.com/$tenant/oauth2/v2.0/token" `
+            -Method Post `
+            -ContentType 'application/x-www-form-urlencoded' `
+            -Body @{
+                client_id     = $clientId
+                client_secret = $clientSecret
+                grant_type    = 'client_credentials'
+                scope         = 'https://api.powerplatform.com/.default'
+            } `
+            -ErrorAction Stop
+    }
+    else {
+        return Get-DefaultAzureCredentialAccessToken
+    }
+
+    if ([string]::IsNullOrWhiteSpace([string]$tokenResponse.access_token)) {
+        throw 'The identity provider returned no Power Platform API access token.'
+    }
+
+    return [string]$tokenResponse.access_token
+}
+
+function Resolve-PowerPlatformEnvironmentId {
+    <#
+    .SYNOPSIS
+        Resolves the Power Platform environment ID for a Dataverse organization.
+    .DESCRIPTION
+        Queries the Power Platform environments API by Dataverse organization ID.
+        Exactly one match is required; the API caller must have tenant-scoped access.
+    .PARAMETER OrganizationId
+        Organization ID returned by Dataverse WhoAmI.
+    .PARAMETER AccessToken
+        Bearer token for the Power Platform API.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OrganizationId,
+        [Parameter(Mandatory = $true)]
+        [string]$AccessToken
+    )
+
+    $encodedFilter = [System.Uri]::EscapeDataString("dataverseId eq '$OrganizationId'")
+    $uri = "https://api.powerplatform.com/environmentmanagement/environments?%24filter=$encodedFilter&%24select=id,dataverseId&%24top=2&api-version=2024-10-01"
+    $response = Invoke-RestMethod -Uri $uri -Method Get -Headers @{
+        Authorization = "Bearer $AccessToken"
+    } -ErrorAction Stop
+
+    if ($null -eq $response -or $null -eq $response.value) {
+        throw "The Power Platform API returned no environment list for Dataverse organization '$OrganizationId'."
+    }
+
+    $matchingEnvironments = @($response.value | Where-Object { $_.dataverseId -eq $OrganizationId })
+    if ($matchingEnvironments.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$matchingEnvironments[0].id)) {
+        throw "Expected one Power Platform environment for Dataverse organization '$OrganizationId'; found $($matchingEnvironments.Count)."
+    }
+
+    return [string]$matchingEnvironments[0].id
+}
+
+function Invoke-PowerPlatformSettingMap {
+    <#
+    .SYNOPSIS
+        Resolves and patches one Power Platform environment-settings map.
+    .DESCRIPTION
+        Resolves the target environment ID from the connected Dataverse organization
+        once and reuses it across deployment phases. Acquires a fresh API token for
+        each patch. API, authentication, and setting errors stop deployment.
+    .PARAMETER Settings
+        Hashtable mapping Power Platform setting names to values or scriptblocks.
+    .PARAMETER Context
+        Deployment context supplied to configured scriptblocks.
+    .PARAMETER SettingMapName
+        Configuration key used to identify scriptblock failures.
+    .PARAMETER EnvironmentContext
+        Mutable hashtable used to cache the resolved environment ID across phases.
+    #>
+    param(
+        $Settings,
+        [Parameter(Mandatory = $true)]
+        [string]$SettingMapName,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Context,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$EnvironmentContext
+    )
+
+    if ($null -eq $Settings) {
+        return
+    }
+    if ($Settings -isnot [hashtable]) {
+        $settingType = $Settings.GetType().FullName
+        throw "Setting map '$SettingMapName' must be a hashtable; received '$settingType'."
+    }
+    if ($Settings.Count -eq 0) {
+        return
+    }
+
+    $accessToken = Get-PowerPlatformApiAccessToken
+    if (-not $EnvironmentContext.ContainsKey('EnvironmentId')) {
+        $whoAmI = Get-DataverseWhoAmI
+        $organizationId = [string]$whoAmI.OrganizationId
+        if ([string]::IsNullOrWhiteSpace($organizationId)) {
+            throw 'Dataverse WhoAmI returned no organization ID; cannot resolve the Power Platform environment.'
+        }
+        $EnvironmentContext.EnvironmentId = Resolve-PowerPlatformEnvironmentId -OrganizationId $organizationId -AccessToken $accessToken
+    }
+
+    $scriptContext = @{}
+    foreach ($key in $Context.Keys) {
+        $scriptContext[$key] = $Context[$key]
+    }
+    $scriptContext.EnvironmentId = $EnvironmentContext.EnvironmentId
+    $inputObject = Resolve-ConfiguredSettingMap -Settings $Settings -SettingMapName $SettingMapName -Context $scriptContext
+    if ($null -eq $inputObject) {
+        return
+    }
+
+    $uri = "https://api.powerplatform.com/environmentmanagement/environments/$($EnvironmentContext.EnvironmentId)/settings?api-version=2024-10-01"
+    $body = $inputObject | ConvertTo-Json -Depth 10 -Compress
+    $null = Invoke-RestMethod -Uri $uri -Method Patch -Headers @{
+        Authorization = "Bearer $accessToken"
+    } -ContentType 'application/json' -Body $body -ErrorAction Stop
 }
 
 function Get-SolutionCodeAppPath {
@@ -954,6 +1270,189 @@ function Register-AlmSolutionVersion {
     }
 
     throw "Could not reserve a solution version for '$SolutionName' after $MaximumAttempts attempts."
+}
+
+function Get-AlmSolutionPackageFingerprint {
+    <#
+    .SYNOPSIS
+        Computes a stable fingerprint of one or more Dataverse solution ZIPs.
+    .DESCRIPTION
+        Hashes sorted archive entry paths, lengths and content hashes rather than
+        ZIP bytes, which can vary because of container metadata such as timestamps.
+        Throws when a package is missing, unreadable or contains duplicate paths.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$PackagePaths
+    )
+
+    $records = [System.Collections.Generic.List[string]]::new()
+    $sortedPackagePaths = [string[]]$PackagePaths
+    [Array]::Sort($sortedPackagePaths, [System.StringComparer]::Ordinal)
+    foreach ($packagePath in $sortedPackagePaths) {
+        if (-not (Test-Path -LiteralPath $packagePath -PathType Leaf)) {
+            throw "Solution package not found while checking version collisions: $packagePath"
+        }
+
+        $packageName = [System.IO.Path]::GetFileName($packagePath)
+        $packageType = if ($packageName -match '(?i)_managed\.zip$') { 'Managed' } else { 'Unmanaged' }
+        $archive = $null
+        try {
+            $archive = [System.IO.Compression.ZipFile]::OpenRead($packagePath)
+            $entryNames = [System.Collections.Generic.List[string]]::new()
+            $entriesByName = [System.Collections.Generic.Dictionary[string, System.IO.Compression.ZipArchiveEntry]]::new([System.StringComparer]::Ordinal)
+            foreach ($entry in $archive.Entries) {
+                if ($entriesByName.ContainsKey($entry.FullName)) {
+                    throw "Solution package '$packagePath' contains duplicate entry '$($entry.FullName)'."
+                }
+                $entryNames.Add($entry.FullName)
+                $entriesByName.Add($entry.FullName, $entry)
+            }
+            $sortedEntryNames = $entryNames.ToArray()
+            [Array]::Sort($sortedEntryNames, [System.StringComparer]::Ordinal)
+            foreach ($entryName in $sortedEntryNames) {
+                $entry = $entriesByName[$entryName]
+                if ($entry.FullName.EndsWith('/')) { continue }
+
+                $entryStream = $null
+                try {
+                    $entryStream = $entry.Open()
+                    $entryHash = [System.Security.Cryptography.SHA256]::HashData($entryStream)
+                }
+                finally {
+                    if ($null -ne $entryStream) { $entryStream.Dispose() }
+                }
+                $records.Add("$packageType`0$($entry.FullName)`0$($entry.Length)`0$([Convert]::ToHexString($entryHash))")
+            }
+        }
+        catch {
+            throw "Could not fingerprint solution package '$packagePath'. $($_.Exception.Message)"
+        }
+        finally {
+            if ($null -ne $archive) { $archive.Dispose() }
+        }
+    }
+
+    if ($records.Count -eq 0) {
+        throw 'Cannot fingerprint an empty set of solution package files.'
+    }
+
+    $canonicalContent = ConvertTo-Json -InputObject @($records.ToArray()) -Depth 2 -Compress
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($canonicalContent)
+    return [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+}
+
+function Register-AlmSolutionContent {
+    <#
+    .SYNOPSIS
+        Claims a solution version for a package fingerprint using an annotated Git tag.
+    .DESCRIPTION
+        A remote tag push atomically records the first package fingerprint for a
+        solution/version pair. A later build may reuse that version only when its
+        fingerprint matches. Existing unrecognized tags and Git failures throw.
+    .PARAMETER MaximumAttempts
+        Maximum attempts to publish or verify the content claim (1-1000).
+    #>
+    [CmdletBinding()]
+    [OutputType([void])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepositoryPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SolutionName,
+
+        [Parameter(Mandatory = $true)]
+        [version]$Version,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$Fingerprint,
+
+        [ValidateRange(1, 1000)]
+        [int]$MaximumAttempts = 3
+    )
+
+    $tagName = "alm4dv/solution-content/$($SolutionName.ToLowerInvariant())/$Version"
+    $tagRef = "refs/tags/$tagName"
+    $formatResult = Invoke-AlmGitCommand -RepositoryPath $RepositoryPath -Arguments @('check-ref-format', $tagRef)
+    if ($formatResult.ExitCode -ne 0) {
+        throw "Solution '$SolutionName' produced an invalid content-claim tag '$tagName'. $($formatResult.Output)"
+    }
+
+    $message = "ALM4Dataverse-Solution-Content-SHA256: $Fingerprint"
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        $remoteTag = Invoke-AlmGitCommand -RepositoryPath $RepositoryPath -Arguments @('ls-remote', '--refs', 'origin', $tagRef)
+        if ($remoteTag.ExitCode -ne 0) {
+            throw "Failed to check solution content claim '$tagName' on origin. $($remoteTag.Output)"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($remoteTag.Output)) {
+            $temporaryRef = "refs/alm4dv/content-check/$([guid]::NewGuid().ToString('N'))"
+            try {
+                $fetchTag = Invoke-AlmGitCommand -RepositoryPath $RepositoryPath -Arguments @('fetch', '--no-tags', 'origin', "${tagRef}:$temporaryRef")
+                if ($fetchTag.ExitCode -ne 0) {
+                    throw "Failed to fetch existing solution content claim '$tagName'. $($fetchTag.Output)"
+                }
+                $tagContents = Invoke-AlmGitCommand -RepositoryPath $RepositoryPath -Arguments @('cat-file', '-p', $temporaryRef)
+                if ($tagContents.ExitCode -ne 0) {
+                    throw "Failed to read existing solution content claim '$tagName'. $($tagContents.Output)"
+                }
+                $existingFingerprint = [regex]::Match($tagContents.Output, '(?m)^ALM4Dataverse-Solution-Content-SHA256: (?<hash>[0-9a-f]{64})$')
+                if (-not $existingFingerprint.Success) {
+                    throw "Existing tag '$tagName' does not contain a recognized solution content fingerprint. Resolve the tag manually before rebuilding."
+                }
+                if ($existingFingerprint.Groups['hash'].Value -cne $Fingerprint) {
+                    throw "Solution '$SolutionName' version $Version already identifies different package content (existing $($existingFingerprint.Groups['hash'].Value), current $Fingerprint). Increment the solution version before building."
+                }
+                Write-Host "[$SolutionName][Version] Version $Version is already associated with identical package content."
+                return
+            }
+            finally {
+                $deleteTemporaryRef = Invoke-AlmGitCommand -RepositoryPath $RepositoryPath -Arguments @('update-ref', '-d', $temporaryRef)
+                if ($deleteTemporaryRef.ExitCode -notin @(0, 1)) {
+                    throw "Failed to clean up temporary solution content ref '$temporaryRef'. $($deleteTemporaryRef.Output)"
+                }
+            }
+        }
+
+        $localTag = Invoke-AlmGitCommand -RepositoryPath $RepositoryPath -Arguments @('show-ref', '--verify', '--quiet', $tagRef)
+        if ($localTag.ExitCode -eq 0) {
+            throw "Local solution content tag '$tagName' exists but is not present on origin. Reconcile the local tag before building."
+        }
+        if ($localTag.ExitCode -ne 1) {
+            throw "Failed to check local solution content tag '$tagName'. $($localTag.Output)"
+        }
+
+        $createTag = Invoke-AlmGitCommand -RepositoryPath $RepositoryPath -Arguments @(
+            '-c', 'user.name=ALM4Dataverse',
+            '-c', 'user.email=alm4dataverse@users.noreply.github.com',
+            'tag', '-a', $tagName, 'HEAD', '-m', $message
+        )
+        if ($createTag.ExitCode -ne 0) {
+            throw "Failed to create solution content tag '$tagName'. $($createTag.Output)"
+        }
+
+        $pushTag = Invoke-AlmGitCommand -RepositoryPath $RepositoryPath -Arguments @('push', 'origin', "${tagRef}:$tagRef")
+        if ($pushTag.ExitCode -eq 0) { return }
+
+        $deleteTag = Invoke-AlmGitCommand -RepositoryPath $RepositoryPath -Arguments @('tag', '-d', $tagName)
+        if ($deleteTag.ExitCode -ne 0) {
+            throw "Failed to remove local solution content tag '$tagName' after a rejected push. Push output: $($pushTag.Output). Cleanup output: $($deleteTag.Output)"
+        }
+
+        $remoteTag = Invoke-AlmGitCommand -RepositoryPath $RepositoryPath -Arguments @('ls-remote', '--refs', 'origin', $tagRef)
+        if ($remoteTag.ExitCode -ne 0) {
+            throw "Failed to verify solution content tag '$tagName' after a rejected push. Push output: $($pushTag.Output). Check output: $($remoteTag.Output)"
+        }
+        if ([string]::IsNullOrWhiteSpace($remoteTag.Output)) {
+            throw "Failed to push solution content tag '$tagName'. $($pushTag.Output)"
+        }
+    }
+
+    throw "Could not verify solution content for '$SolutionName' version $Version after $MaximumAttempts attempts."
 }
 
 function Resolve-AlmBuildVersion {

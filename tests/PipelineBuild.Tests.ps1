@@ -28,10 +28,15 @@ public static class AlmBuildMappingTestCapture
     function Invoke-CodeAppTestNpm {
         $global:LASTEXITCODE = 0
     }
+    function Register-AlmSolutionContent {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Mock command signature; Pester inspects these arguments.')]
+        param($RepositoryPath, $SolutionName, $Version, $Fingerprint)
+    }
 }
 
 Describe 'Build artifacts and solution-check helpers' {
     BeforeEach {
+        $global:AlmBuildTestForEachObjectCommand = Microsoft.PowerShell.Core\Get-Command -Name 'ForEach-Object' -CommandType Cmdlet
         $script:savedEnvironment = @{
             GITHUB_STEP_SUMMARY             = $env:GITHUB_STEP_SUMMARY
             TF_BUILD                        = $env:TF_BUILD
@@ -50,7 +55,8 @@ Describe 'Build artifacts and solution-check helpers' {
         $fixtureRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         $script:sourceDirectory = Join-Path $fixtureRoot 'source'
         $script:artifactDirectory = Join-Path $fixtureRoot 'artifacts'
-        New-Item -ItemType Directory -Path (Join-Path $script:sourceDirectory 'data'), (Join-Path $script:sourceDirectory 'solutions/Example'), (Join-Path $script:sourceDirectory 'plugins'), (Join-Path $script:artifactDirectory 'solutions') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $script:sourceDirectory 'data'), (Join-Path $script:sourceDirectory 'solutions/Example/Other'), (Join-Path $script:sourceDirectory 'plugins'), (Join-Path $script:artifactDirectory 'solutions') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $script:sourceDirectory 'solutions/Example/Other/Solution.xml') -Value '<ImportExportXml><SolutionManifest><Version>1.0.0.0</Version></SolutionManifest></ImportExportXml>'
         Set-Content -LiteralPath (Join-Path $script:sourceDirectory 'data/example.txt') -Value 'asset'
         Set-Content -LiteralPath (Join-Path $script:sourceDirectory 'plugins/Example.dll') -Value 'plugin'
         Set-Content -LiteralPath (Join-Path $script:sourceDirectory 'plugins/Second.dll') -Value 'plugin'
@@ -68,8 +74,16 @@ Describe 'Build artifacts and solution-check helpers' {
                 [AlmBuildMappingTestCapture]::MappingPath = $MappingFile
                 [AlmBuildMappingTestCapture]::MappingXml = Get-Content -LiteralPath $MappingFile -Raw
             }
-            Set-Content -LiteralPath $OutputPath -Value 'packed solution'
+            $archive = [System.IO.Compression.ZipFile]::Open($OutputPath, [System.IO.Compression.ZipArchiveMode]::Create)
+            try {
+                $entry = $archive.CreateEntry('Other/Solution.xml')
+                $writer = [System.IO.StreamWriter]::new($entry.Open())
+                try { $writer.Write('<Solution/>') }
+                finally { $writer.Dispose() }
+            }
+            finally { $archive.Dispose() }
         }
+        Mock Register-AlmSolutionContent {}
         Mock Copy-Item { New-Item -ItemType Directory -Path $Destination -Force | Out-Null } -ParameterFilter { $Destination -match '[\\/]alm$' }
         Mock Get-Module {
             if ($env:ALM_BUILD_TEST_REQUIRE_PACK_COMMAND -eq 'true' -and $env:ALM_BUILD_TEST_PACK_COMMAND_RESOLVED -ne 'true') {
@@ -89,21 +103,27 @@ Describe 'Build artifacts and solution-check helpers' {
             }
         } -ParameterFilter { $Name -eq 'Compress-DataverseSolutionFile' }
         Mock Get-Command { [pscustomobject]@{ Source = 'Invoke-TestDotnet' } } -ParameterFilter { $Name -eq 'dotnet' }
-        Mock Test-Path { $true } -ParameterFilter { $Path -match '[\\/]\.alm4dataverse[\\/]tools$' }
+        Mock Test-Path { $true } -ParameterFilter {
+            $candidatePath = if ($null -ne $LiteralPath) { [string]$LiteralPath } else { [string]$Path }
+            $candidatePath -match '[\\/]\.alm4dataverse[\\/]tools$'
+        }
         Mock Invoke-TestDotnet { $global:LASTEXITCODE = 0; 'microsoft.powerapps.cli.tool 2.13.1+build pac' }
         Mock Get-Command { [pscustomobject]@{ Source = 'Invoke-TestPac' } } -ParameterFilter { $Name -eq 'pac' }
         Mock Invoke-TestPac { $global:LASTEXITCODE = 0; 'Critical: 0'; 'High: 1'; 'Low: 2' }
         # Most cases keep work in Pester's runspace so mocks remain visible. Both overlap cases
         # opt out and supply an importable pack module to exercise actual worker isolation.
         Mock ForEach-Object {
+            $InputObject | & $global:AlmBuildTestForEachObjectCommand -Process $Process
+        } -ParameterFilter { $null -eq $Parallel }
+        Mock ForEach-Object {
             if ($env:ALM_BUILD_TEST_REAL_PARALLEL -eq 'true') {
-                $InputObject | Microsoft.PowerShell.Core\ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel $Parallel
+                $InputObject | & $global:AlmBuildTestForEachObjectCommand -ThrottleLimit $ThrottleLimit -Parallel $Parallel
             }
             else {
                 if ($null -ne $Parallel -and $null -ne $InputObject -and $InputObject.PSObject.Properties['CommandName']) {
                     $env:ALM_BUILD_TEST_PARALLEL_COMMAND_STAGE = 'true'
                 }
-                $InputObject | Microsoft.PowerShell.Core\ForEach-Object -Process $Parallel
+                $InputObject | & $global:AlmBuildTestForEachObjectCommand -Process $Parallel
             }
         } -ParameterFilter { $null -ne $Parallel -and $env:ALM_BUILD_TEST_REAL_PARALLEL -ne 'true' }
     }
@@ -115,11 +135,13 @@ Describe 'Build artifacts and solution-check helpers' {
         $global:LASTEXITCODE = $script:savedExitCode
         Remove-Variable -Name ALM_BUILD_TEST_PAC_PACK_ARGUMENTS -Scope Global -ErrorAction SilentlyContinue
         Remove-Variable -Name ALM_BUILD_TEST_CAPTURED_MAPPING_PATH, ALM_BUILD_TEST_CAPTURED_MAPPING_XML -Scope Global -ErrorAction SilentlyContinue
+        Remove-Variable -Name AlmBuildTestForEachObjectCommand -Scope Global -ErrorAction SilentlyContinue
     }
 
     It 'packs solutions, copies assets/configuration, and locks actual installed versions' {
         & $script:buildScript -SourceDirectory $script:sourceDirectory -ArtifactStagingDirectory $script:artifactDirectory
         Should -Invoke Compress-DataverseSolutionFile -Times 1 -Exactly -ParameterFilter { $PackageType -eq 'Both' }
+        Should -Invoke Register-AlmSolutionContent -Times 1 -Exactly -ParameterFilter { $SolutionName -eq 'Example' -and $Version.ToString() -eq '1.0.0.0' -and $Fingerprint -match '^[0-9a-f]{64}$' }
         Should -Invoke ForEach-Object -Times 1 -Exactly -ParameterFilter { $null -ne $Parallel -and $ThrottleLimit -eq 2 }
         Test-Path (Join-Path $script:artifactDirectory 'data/example.txt') | Should -BeTrue
         Test-Path (Join-Path $script:artifactDirectory 'alm-config.psd1') | Should -BeTrue
@@ -216,17 +238,36 @@ Describe 'Build artifacts and solution-check helpers' {
         { Convert-SolutionCheckSeverityToRank -Severity Unknown } | Should -Throw '*Unknown solution check severity*'
     }
 
-    It 'uses defaults for missing build settings and validates explicit parallel limits' {
+    It 'uses defaults for build settings and validates the collision guard' {
         . $script:buildScript -SourceDirectory $script:sourceDirectory -ArtifactStagingDirectory $script:artifactDirectory
         $settings = Get-AlmBuildSetting -Config @{}
         $settings.parallel | Should -BeTrue
         $settings.maxParallel | Should -Be 2
+        $settings.versionCollisionGuard | Should -BeTrue
         $settings = Get-AlmBuildSetting -Config @{ build = @{ parallel = $false; maxParallel = 4 } }
         $settings.parallel | Should -BeFalse
         $settings.maxParallel | Should -Be 4
+        $settings = Get-AlmBuildSetting -Config @{ build = @{ versionCollisionGuard = $false } }
+        $settings.versionCollisionGuard | Should -BeFalse
         { Get-AlmBuildSetting -Config @{ build = 'invalid' } } | Should -Throw '*build must be a hashtable*'
         { Get-AlmBuildSetting -Config @{ build = @{ parallel = 'false' } } } | Should -Throw '*build.parallel*'
         { Get-AlmBuildSetting -Config @{ build = @{ maxParallel = 9 } } } | Should -Throw '*build.maxParallel*'
+        { Get-AlmBuildSetting -Config @{ build = @{ versionCollisionGuard = 'false' } } } | Should -Throw '*build.versionCollisionGuard*'
+    }
+
+    It 'skips package content claims when the version collision guard is disabled' {
+        Set-Content -LiteralPath (Join-Path $script:sourceDirectory 'alm-config.psd1') -Value @'
+@{
+    solutions = @(@{ name = 'Example' })
+    build = @{ parallel = $false; versionCollisionGuard = $false }
+    assets = @()
+    hooks = @{}
+}
+'@
+
+        & $script:buildScript -SourceDirectory $script:sourceDirectory -ArtifactStagingDirectory $script:artifactDirectory
+
+        Should -Invoke Register-AlmSolutionContent -Times 0 -Exactly
     }
 
     It 'runs build commands in parallel by default before packing' {
@@ -414,6 +455,7 @@ Export-ModuleMember -Function Compress-DataverseSolutionFile
             }
         )
     })
+    build = @{ versionCollisionGuard = `$false }
     assets = @('data')
     hooks = @{}
 }
@@ -623,6 +665,7 @@ Export-ModuleMember -Function Compress-DataverseSolutionFile
         Set-Content -LiteralPath (Join-Path $script:sourceDirectory 'alm-config.psd1') -Value @'
 @{
     solutions = @(@{ name = 'First' }, @{ name = 'Second' })
+    build = @{ versionCollisionGuard = $false }
     assets = @('data')
     hooks = @{}
 }
@@ -688,6 +731,7 @@ Export-ModuleMember -Function Compress-DataverseSolutionFile
 @{
     solutions = @(@{ name = 'Example'; solutionCheck = @{} }, @{ name = 'Disabled'; solutionCheck = @{ enabled = $false } })
     solutionCheck = @{ enabled = $true; maxParallel = 0; geo = 'UnitedStates'; ruleSet = 'rule-set'; excludedFiles = '*.js'; ruleLevelOverride = @{ Id = 'rule'; OverrideLevel = 'Low' }; failThreshold = 'Critical' }
+    build = @{ versionCollisionGuard = $false }
     assets = @('data')
     hooks = @{}
 }
