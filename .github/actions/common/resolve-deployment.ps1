@@ -396,6 +396,7 @@ function Find-LatestSuccessfulBuildRunForBranch {
 $environmentName = $env:INPUT_ENVIRONMENT_NAME.Trim()
 $previousName = $env:INPUT_PREVIOUS_ENVIRONMENT_NAME.Trim()
 $promotionMode = $env:INPUT_PROMOTION_MODE.Trim()
+$continueDeployment = $env:INPUT_CONTINUE_DEPLOYMENT -eq 'true'
 $githubContext = $env:INPUT_GITHUB_CONTEXT_JSON | ConvertFrom-Json -Depth 100
 $callerInputs = $env:INPUT_CALLER_INPUTS_JSON | ConvertFrom-Json -Depth 50
 $eventName = [string]$githubContext.event_name
@@ -407,8 +408,25 @@ $triggerBranch = $env:INPUT_TRIGGER_BRANCH.Trim()
 $manualSelector = [string]$callerInputs.'build-run-name'
 if ([string]::IsNullOrWhiteSpace($manualSelector)) { $manualSelector = [string]$callerInputs.'build-run-id' }
 $targetEnvironment = [string]$callerInputs.'target-environment'
+if ([string]::IsNullOrWhiteSpace($targetEnvironment) -and $eventName -eq 'workflow_dispatch') {
+    $targetEnvironment = $environmentName
+}
 
-$callerBranch = if ($eventName -eq 'repository_dispatch') { $dispatchBranch.Trim() } else { Resolve-WorkflowDispatchBranch $githubContext }
+$inputBranch = if ($null -ne $callerInputs -and $callerInputs.PSObject.Properties.Name -contains 'branch') {
+    [string]$callerInputs.branch
+}
+else {
+    ''
+}
+$callerBranch = if ($eventName -eq 'repository_dispatch') {
+    $dispatchBranch.Trim()
+}
+elseif (-not [string]::IsNullOrWhiteSpace($inputBranch)) {
+    $inputBranch.Trim()
+}
+else {
+    Resolve-WorkflowDispatchBranch $githubContext
+}
 if ([string]::IsNullOrWhiteSpace($triggerBranch) -or $callerBranch -cne $triggerBranch) { throw "Deployment branch '$callerBranch' does not match trigger-branch '$triggerBranch'." }
 if ($promotionMode -notin @('manual-gate-tag', 'environment-approval')) { throw "Unsupported promotion-mode '$promotionMode'." }
 if ($eventName -eq 'workflow_dispatch' -and [string]::IsNullOrWhiteSpace($targetEnvironment) -and $promotionMode -ne 'environment-approval') { throw 'workflow_dispatch requires target-environment.' }
@@ -508,8 +526,9 @@ if ($null -ne $release) { $releaseHasArtifacts = @($release.assets | Where-Objec
 
 # Per-build gates are append-only promotion evidence; the environment pointer is
 # separate and moves after deployment in both promotion modes.
-$requiredGateTag = if ($promotionMode -eq 'manual-gate-tag' -and $previousName) { "deployed/$buildTagKey/$previousName" } else { '' }
-$successGateTag = if ($promotionMode -eq 'manual-gate-tag') { "deployed/$buildTagKey/$environmentName" } else { '' }
+$gateTagsEnabled = ($promotionMode -eq 'manual-gate-tag' -or $continueDeployment)
+$requiredGateTag = if ($gateTagsEnabled -and $previousName) { "deployed/$buildTagKey/$previousName" } else { '' }
+$successGateTag = if ($gateTagsEnabled) { "deployed/$buildTagKey/$environmentName" } else { '' }
 $environmentPointerTag = "deployed/$environmentName"
 $artifactSource = if ($releaseHasArtifacts) { 'release' } else { 'build' }
 

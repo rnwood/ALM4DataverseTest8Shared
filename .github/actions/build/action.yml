@@ -1,5 +1,5 @@
-# The caller owns job permissions: publishing tags/Releases and dispatching requires
-# contents:write; Azure OIDC also requires id-token:write when validation is enabled.
+# The caller owns permissions: publishing tags/Releases needs contents:write; automatic
+# DEPLOY dispatch needs actions:write; Azure OIDC also needs id-token:write for validation.
 name: Build
 description: Build, validate, optionally deploy a baseline and candidate to the validation environment, publish, and tag Dataverse solution artifacts.
 
@@ -12,9 +12,13 @@ inputs:
     required: false
     default: ''
   source-branch:
-    description: Optional source branch used for downstream repository_dispatch payloads.
+    description: Optional source branch used for build versioning and deployment dispatch.
     required: false
     default: ''
+  deployment-promotion-mode:
+    description: GitHub deployment mode; only environment-approval automatically dispatches DEPLOY.
+    required: false
+    default: environment-approval
   environment-name:
     description: Optional GitHub environment used to authenticate and deploy the baseline and candidate artifacts for deployment validation.
     required: false
@@ -58,6 +62,16 @@ runs:
         ref: ${{ inputs.source-ref != '' && inputs.source-ref || github.sha }}
         path: self
         fetch-depth: 1
+
+    - name: Validate deployment promotion mode
+      shell: pwsh
+      env:
+        DEPLOYMENT_PROMOTION_MODE: ${{ inputs.deployment-promotion-mode }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        if ($env:DEPLOYMENT_PROMOTION_MODE -notin @('manual-gate-tag', 'environment-approval')) {
+          throw "Unsupported GitHub deployment mode '$($env:DEPLOYMENT_PROMOTION_MODE)'."
+        }
 
     # Branch identity drives versioning and downstream dispatch, independently of
     # source-ref checkout. A non-branch workflow ref needs an explicit branch override.
@@ -385,56 +399,58 @@ runs:
           }
           core.setOutput('release_url', release.html_url);
 
-    # Branch-normalized event types route to branch-specific DEPLOY workflows.
-    # Payload SHA/tag/run refer to the build just published, not the receiving
-    # workflow's default-branch SHA. Native gh failure must fail this handoff.
-    - name: Trigger DEPLOY via repository_dispatch
+    # In environment-approval mode, start the shared workflow on the source branch
+    # so branch restrictions and the selected BUILD identity remain aligned.
+    - name: Trigger DEPLOY for configured branches
       shell: pwsh
+      working-directory: ${{ github.workspace }}/self
       env:
         GH_REPO: ${{ github.repository }}
         GH_TOKEN: ${{ github.token }}
         BUILD_RUN_ID: ${{ github.run_id }}
-        BUILD_RUN_NAME: ${{ steps.build-number.outputs.run_name }}
         BUILD_BRANCH: ${{ inputs.source-branch != '' && inputs.source-branch || github.ref_name }}
-        BUILD_RELEASE_TAG: ${{ steps.tag-source.outputs.tag_name }}
         BUILD_SOURCE_SHA: ${{ steps.tag-source.outputs.source_sha }}
-        BUILD_EVENT: ${{ github.event_name }}
+        DEPLOYMENT_PROMOTION_MODE: ${{ inputs.deployment-promotion-mode }}
       run: |
         $ErrorActionPreference = 'Stop'
 
+        if ($env:DEPLOYMENT_PROMOTION_MODE -eq 'manual-gate-tag') {
+          Write-Host 'GitHub deployment uses manual-gate-tag mode; no automatic DEPLOY run will be started.'
+          return
+        }
+
         if ([string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {
-          throw 'No token available for repository dispatch.'
+          throw 'No token available to dispatch the DEPLOY workflow.'
         }
 
         if ([string]::IsNullOrWhiteSpace($env:BUILD_SOURCE_SHA)) {
-          throw 'Failed to resolve source commit SHA for repository_dispatch payload.'
+          throw 'Failed to resolve source commit SHA for the DEPLOY workflow dispatch.'
         }
 
-        $eventBranchToken = ([string]$env:BUILD_BRANCH).ToLowerInvariant() -replace '[^a-z0-9]+', '-'
-        $eventBranchToken = $eventBranchToken.Trim('-')
-        if ([string]::IsNullOrWhiteSpace($eventBranchToken)) {
-          throw "Failed to resolve branch token for repository_dispatch event type from branch '$($env:BUILD_BRANCH)'."
+        $config = Import-PowerShellDataFile -LiteralPath 'alm-config.psd1'
+        if (-not $config.Contains('deployment') -or -not $config.deployment.Contains('branches') -or
+            -not $config.deployment.branches.Contains($env:BUILD_BRANCH)) {
+          Write-Host "No deployment environments are configured for '$($env:BUILD_BRANCH)'; no DEPLOY run will be started."
+          exit 0
+        }
+        if (@($config.deployment.branches[$env:BUILD_BRANCH]).Count -eq 0) {
+          Write-Host "No deployment environments are configured for '$($env:BUILD_BRANCH)'; no DEPLOY run will be started."
+          exit 0
         }
 
-        $eventType = "alm4dataverse-build-deploy-$eventBranchToken"
         $payload = @{
-          event_type = $eventType
-          client_payload = @{
-            branch         = $env:BUILD_BRANCH
-            sha            = $env:BUILD_SOURCE_SHA
-            build_run_id   = $env:BUILD_RUN_ID
-            build_run_name = $env:BUILD_RUN_NAME
-              release_tag    = $env:BUILD_RELEASE_TAG
-            build_run_url  = "https://github.com/$($env:GH_REPO)/actions/runs/$($env:BUILD_RUN_ID)"
-            build_event    = $env:BUILD_EVENT
-            dispatched_at  = (Get-Date).ToUniversalTime().ToString('o')
+          ref = $env:BUILD_BRANCH
+          inputs = @{
+            branch = $env:BUILD_BRANCH
+            'build-run-name' = $env:BUILD_RUN_ID
+            'source-sha' = $env:BUILD_SOURCE_SHA
           }
         } | ConvertTo-Json -Depth 10 -Compress
 
-        $result = @($payload | & gh api --method POST "repos/$($env:GH_REPO)/dispatches" --input - 2>&1)
+        $result = @($payload | & gh api --method POST "repos/$($env:GH_REPO)/actions/workflows/DEPLOY.yml/dispatches" --input - 2>&1)
         if ($LASTEXITCODE -ne 0) {
           $errorText = @($result | ForEach-Object { [string]$_ }) -join "`n"
-          throw "Failed to send repository_dispatch event: $errorText"
+          throw "Failed to start DEPLOY for '$($env:BUILD_BRANCH)': $errorText"
         }
 
-        Write-Host 'repository_dispatch event sent successfully.'
+        Write-Host "DEPLOY run started for branch '$($env:BUILD_BRANCH)'."
