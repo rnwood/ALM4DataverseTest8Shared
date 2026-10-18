@@ -8,7 +8,7 @@ using Microsoft.Xrm.Tooling.PackageDeployment.CrmPackageExtentionBase;
 
 namespace ALM4Dataverse.PackageDeployer
 {
-    [Export(typeof(IImportExtensions2))]
+    [Export(typeof(IImportExtensions))]
     public class PackageImportExtension : ImportExtension
     {
         private Dictionary<string, string> _runtimeSettings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
