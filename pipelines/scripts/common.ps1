@@ -109,7 +109,7 @@ function ConvertTo-SolutionPackagerMappingXml {
     $document = [System.Xml.XmlDocument]::new()
     $declaration = $document.CreateXmlDeclaration('1.0', 'utf-8', $null)
     [void]$document.AppendChild($declaration)
-    $root = $document.CreateElement('Mappings')
+    $root = $document.CreateElement('Mapping')
     [void]$document.AppendChild($root)
 
     foreach ($entry in $Entries) {

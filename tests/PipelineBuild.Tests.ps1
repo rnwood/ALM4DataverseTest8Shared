@@ -112,13 +112,15 @@ Describe 'Build artifacts and solution-check helpers' {
         # Most cases keep work in Pester's runspace so mocks remain visible. Both overlap cases
         # opt out and supply an importable pack module to exercise actual worker isolation.
         Mock ForEach-Object {
-            $InputObject | Microsoft.PowerShell.Core\ForEach-Object -Process $Process
+            $forEachObjectCommand = Microsoft.PowerShell.Core\Get-Command -Name 'ForEach-Object' -CommandType Cmdlet
+            $InputObject | & $forEachObjectCommand -Process $Process
         } -ParameterFilter { $null -eq $Parallel }
         Mock ForEach-Object {
             if ($null -ne $Parallel -and $null -ne $InputObject -and $InputObject.PSObject.Properties['CommandName']) {
                 $env:ALM_BUILD_TEST_PARALLEL_COMMAND_STAGE = 'true'
             }
-            $InputObject | Microsoft.PowerShell.Core\ForEach-Object -Process $Parallel
+            $forEachObjectCommand = Microsoft.PowerShell.Core\Get-Command -Name 'ForEach-Object' -CommandType Cmdlet
+            $InputObject | & $forEachObjectCommand -Process $Parallel
         } -ParameterFilter { $null -ne $Parallel -and $env:ALM_BUILD_TEST_REAL_PARALLEL -ne 'true' }
     }
 
@@ -525,14 +527,14 @@ Export-ModuleMember -Function Compress-DataverseSolutionFile
 
         Should -Invoke Compress-DataverseSolutionFile -Times 1 -Exactly -ParameterFilter { -not [string]::IsNullOrWhiteSpace($MappingFile) }
         Should -Invoke Invoke-TestPac -Times 0 -Exactly
-        [AlmBuildMappingTestCapture]::MappingXml | Should -Match '<Mappings>'
+        [AlmBuildMappingTestCapture]::MappingXml | Should -Match '<Mapping>'
         [AlmBuildMappingTestCapture]::MappingXml | Should -Match 'bin&amp;build'
         $mappingXml = [xml][AlmBuildMappingTestCapture]::MappingXml
-        $mappingTypes = @($mappingXml.Mappings.ChildNodes | ForEach-Object { $_.LocalName }) -join ','
+        $mappingTypes = @($mappingXml.Mapping.ChildNodes | ForEach-Object { $_.LocalName }) -join ','
         $mappingTypes | Should -Be 'FileToFile,Folder,FileToPath'
-        $mappingXml.Mappings.FileToFile.GetAttribute('to') | Should -Be ([System.IO.Path]::GetFullPath($pluginFile))
+        $mappingXml.Mapping.FileToFile.GetAttribute('to') | Should -Be ([System.IO.Path]::GetFullPath($pluginFile))
         $expectedPluginDestination = [System.IO.Path]::GetFullPath((Join-Path $script:sourceDirectory 'solutions/Example/PluginAssemblies/Example.dll'))
-        $mappingXml.Mappings.FileToFile.GetAttribute('map') | Should -Be $expectedPluginDestination
+        $mappingXml.Mapping.FileToFile.GetAttribute('map') | Should -Be $expectedPluginDestination
         Test-Path -LiteralPath ([AlmBuildMappingTestCapture]::MappingPath) | Should -BeFalse
     }
 
