@@ -199,9 +199,10 @@ foreach ($solutionConfig in $solutionsConfig.solutions) {
         throw "Solution '$($solutionConfig.name)' codeAppPublishMethod '$codeAppPublishMethod' is invalid. Use 'solution' or 'pac'."
     }
 
+    $solutionsDirectory = Join-Path -Path $ArtifactsPath -ChildPath 'solutions'
     $solutions += @{
         Name = $solutionConfig.name
-        File = Join-Path -Path $ArtifactsPath -ChildPath solutions -AdditionalChildPath $fileName
+        File = Join-Path -Path $solutionsDirectory -ChildPath $fileName
         DeployUnmanaged = $deployUnmanaged
         ServiceAccountUpnConfigKey = $serviceAccountUpnKey
         CodeApps = @(Get-SolutionCodeAppPath -Solution $solutionConfig -BaseDirectory $ArtifactsPath)
