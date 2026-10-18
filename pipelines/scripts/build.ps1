@@ -1310,6 +1310,72 @@ if ($packageDeployerEnabled) {
 
             $packageZip = [System.IO.Compression.ZipFile]::Open($pdpkgZip, [System.IO.Compression.ZipArchiveMode]::Update)
             try {
+                $moduleAssemblyEntries = @($packageZip.Entries | Where-Object {
+                    $_.FullName.StartsWith('PkgAssets/modules/', [System.StringComparison]::OrdinalIgnoreCase) -and
+                    $_.FullName.EndsWith('.dll', [System.StringComparison]::OrdinalIgnoreCase)
+                })
+                foreach ($moduleAssemblyEntry in $moduleAssemblyEntries) {
+                    $preservedEntryName = "$($moduleAssemblyEntry.FullName).pdasset"
+                    if ($null -ne $packageZip.GetEntry($preservedEntryName)) {
+                        throw "Package Deployer package '$pdpkgZip' already contains preserved module assembly '$preservedEntryName'."
+                    }
+
+                    $preservedEntry = $packageZip.CreateEntry($preservedEntryName, [System.IO.Compression.CompressionLevel]::Optimal)
+                    $moduleAssemblyStream = $moduleAssemblyEntry.Open()
+                    $preservedAssemblyStream = $preservedEntry.Open()
+                    try {
+                        $moduleAssemblyStream.CopyTo($preservedAssemblyStream)
+                    }
+                    finally {
+                        $moduleAssemblyStream.Dispose()
+                        $preservedAssemblyStream.Dispose()
+                    }
+                    $moduleAssemblyEntry.Delete()
+                }
+
+                if ($moduleAssemblyEntries.Count -gt 0) {
+                    $contentTypesEntry = $packageZip.GetEntry('[Content_Types].xml')
+                    $contentTypesStream = $contentTypesEntry.Open()
+                    $contentTypesReader = [System.IO.StreamReader]::new($contentTypesStream)
+                    try {
+                        [xml]$contentTypesDocument = $contentTypesReader.ReadToEnd()
+                    }
+                    finally {
+                        $contentTypesReader.Dispose()
+                    }
+
+                    $preservedAssetContentType = $contentTypesDocument.DocumentElement.ChildNodes |
+                        Where-Object { $_.LocalName -eq 'Default' -and $_.Extension -ieq 'pdasset' } |
+                        Select-Object -First 1
+                    if ($null -eq $preservedAssetContentType) {
+                        $preservedAssetContentType = $contentTypesDocument.CreateElement(
+                            'Default',
+                            $contentTypesDocument.DocumentElement.NamespaceURI
+                        )
+                        $preservedAssetContentType.SetAttribute('Extension', 'pdasset')
+                        $preservedAssetContentType.SetAttribute('ContentType', 'application/octet-stream')
+                        $null = $contentTypesDocument.DocumentElement.AppendChild($preservedAssetContentType)
+
+                        $contentTypesEntry.Delete()
+                        $contentTypesEntry = $packageZip.CreateEntry('[Content_Types].xml')
+                        $contentTypesStream = $contentTypesEntry.Open()
+                        $contentTypesWriter = [System.IO.StreamWriter]::new(
+                            $contentTypesStream,
+                            [System.Text.UTF8Encoding]::new($false)
+                        )
+                        try {
+                            $contentTypesDocument.Save($contentTypesWriter)
+                        }
+                        finally {
+                            $contentTypesWriter.Dispose()
+                        }
+                    }
+                }
+
+                if ($moduleAssemblyEntries.Count -gt 0) {
+                    Write-Host "Preserved $($moduleAssemblyEntries.Count) PowerShell module assemblies from Package Deployer cleanup."
+                }
+
                 $assetsImportConfigEntry = $packageZip.GetEntry('PkgAssets/ImportConfig.xml')
                 $rootImportConfigEntry = $packageZip.GetEntry('ImportConfig.xml')
                 if ($null -ne $rootImportConfigEntry) {

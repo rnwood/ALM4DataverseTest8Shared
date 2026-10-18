@@ -154,6 +154,8 @@ namespace ALM4Dataverse.PackageDeployer
 
         private void RunPowerShell(string script, string workingDirectory, Dictionary<string, string> additionalEnvVars)
         {
+            RestorePowerShellModuleAssemblies(workingDirectory);
+
             var encodedScript = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
             var startInfo = new ProcessStartInfo
             {
@@ -201,6 +203,33 @@ namespace ALM4Dataverse.PackageDeployer
                     throw new InvalidOperationException(message.ToString());
                 }
             }
+        }
+
+        private void RestorePowerShellModuleAssemblies(string packageAssetsDirectory)
+        {
+            var modulesDirectory = Path.Combine(packageAssetsDirectory, "modules");
+            if (!Directory.Exists(modulesDirectory))
+                return;
+
+            var preservedAssemblies = Directory.GetFiles(
+                modulesDirectory,
+                "*.dll.pdasset",
+                SearchOption.AllDirectories
+            );
+            foreach (var preservedAssembly in preservedAssemblies)
+            {
+                var assemblyPath = preservedAssembly.Substring(
+                    0,
+                    preservedAssembly.Length - ".pdasset".Length
+                );
+                if (File.Exists(assemblyPath))
+                    throw new IOException($"Cannot restore packaged module assembly because '{assemblyPath}' already exists.");
+
+                File.Move(preservedAssembly, assemblyPath);
+            }
+
+            if (preservedAssemblies.Length > 0)
+                PackageLog.Log($"Restored {preservedAssemblies.Length} packaged PowerShell module assemblies.");
         }
 
         private static string Escape(string value) => value.Replace("'", "''");
