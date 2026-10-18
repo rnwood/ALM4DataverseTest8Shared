@@ -127,6 +127,7 @@ if ($packageDeployerEnabled -and -not $UseUnmanagedSolutions -and -not $insidePa
         if (-not (Test-Path -LiteralPath $packageAssemblyPath -PathType Leaf)) {
             throw "Package Deployer archive '$packagePath' does not contain ALM4Dataverse.PackageDeployer.dll at its root."
         }
+        Write-Host "##[debug]Package assembly path: $packageAssemblyPath"
 
         $pacArguments = @('package', 'deploy', '--package', $packageAssemblyPath, '--environment', $targetEnvironment, '--logConsole')
         if ($settingsEntries.Count -gt 0) {

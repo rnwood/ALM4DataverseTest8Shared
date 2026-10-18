@@ -1308,6 +1308,52 @@ if ($packageDeployerEnabled) {
                 $packageZip.Dispose()
             }
 
+            $packageZip = [System.IO.Compression.ZipFile]::Open($pdpkgZip, [System.IO.Compression.ZipArchiveMode]::Update)
+            try {
+                $assetsImportConfigEntry = $packageZip.GetEntry('PkgAssets/ImportConfig.xml')
+                $rootImportConfigEntry = $packageZip.GetEntry('ImportConfig.xml')
+                if ($null -ne $rootImportConfigEntry) {
+                    $rootImportConfigEntry.Delete()
+                }
+                $rootImportConfigEntry = $packageZip.CreateEntry('ImportConfig.xml')
+                $assetsImportConfigStream = $assetsImportConfigEntry.Open()
+                $rootImportConfigStream = $rootImportConfigEntry.Open()
+                try {
+                    $assetsImportConfigStream.CopyTo($rootImportConfigStream)
+                }
+                finally {
+                    $assetsImportConfigStream.Dispose()
+                    $rootImportConfigStream.Dispose()
+                }
+            }
+            finally {
+                $packageZip.Dispose()
+            }
+
+            $packageZip = [System.IO.Compression.ZipFile]::OpenRead($pdpkgZip)
+            try {
+                $rootImportConfigEntry = $packageZip.GetEntry('ImportConfig.xml')
+                if ($null -eq $rootImportConfigEntry) {
+                    throw "Package Deployer package '$pdpkgZip' is missing ImportConfig.xml at the archive root."
+                }
+
+                $rootImportConfigStream = $rootImportConfigEntry.Open()
+                $rootImportConfigReader = [System.IO.StreamReader]::new($rootImportConfigStream)
+                try {
+                    [xml]$rootImportConfigDocument = $rootImportConfigReader.ReadToEnd()
+                }
+                finally {
+                    $rootImportConfigReader.Dispose()
+                }
+                $rootSolutionImports = $rootImportConfigDocument.DocumentElement.SelectNodes('solutions/configsolutionfile')
+                if ($rootSolutionImports.Count -eq 0) {
+                    throw "Package Deployer package '$pdpkgZip' does not define any solution imports in root ImportConfig.xml."
+                }
+            }
+            finally {
+                $packageZip.Dispose()
+            }
+
             Write-Host "Package Deployer package created: $pdpkgZip"
         }
         finally {
