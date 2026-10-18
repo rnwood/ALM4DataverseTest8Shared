@@ -213,14 +213,14 @@ namespace ALM4Dataverse.PackageDeployer
 
             var preservedAssemblies = Directory.GetFiles(
                 modulesDirectory,
-                "*.dll.pdasset",
+                "*.dll.bin",
                 SearchOption.AllDirectories
             );
             foreach (var preservedAssembly in preservedAssemblies)
             {
                 var assemblyPath = preservedAssembly.Substring(
                     0,
-                    preservedAssembly.Length - ".pdasset".Length
+                    preservedAssembly.Length - ".bin".Length
                 );
                 if (File.Exists(assemblyPath))
                     throw new IOException($"Cannot restore packaged module assembly because '{assemblyPath}' already exists.");

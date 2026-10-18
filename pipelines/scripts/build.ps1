@@ -1315,7 +1315,7 @@ if ($packageDeployerEnabled) {
                     $_.FullName.EndsWith('.dll', [System.StringComparison]::OrdinalIgnoreCase)
                 })
                 foreach ($moduleAssemblyEntry in $moduleAssemblyEntries) {
-                    $preservedEntryName = "$($moduleAssemblyEntry.FullName).pdasset"
+                    $preservedEntryName = "$($moduleAssemblyEntry.FullName).bin"
                     if ($null -ne $packageZip.GetEntry($preservedEntryName)) {
                         throw "Package Deployer package '$pdpkgZip' already contains preserved module assembly '$preservedEntryName'."
                     }
@@ -1345,14 +1345,14 @@ if ($packageDeployerEnabled) {
                     }
 
                     $preservedAssetContentType = $contentTypesDocument.DocumentElement.ChildNodes |
-                        Where-Object { $_.LocalName -eq 'Default' -and $_.Extension -ieq 'pdasset' } |
+                        Where-Object { $_.LocalName -eq 'Default' -and $_.Extension -ieq 'bin' } |
                         Select-Object -First 1
                     if ($null -eq $preservedAssetContentType) {
                         $preservedAssetContentType = $contentTypesDocument.CreateElement(
                             'Default',
                             $contentTypesDocument.DocumentElement.NamespaceURI
                         )
-                        $preservedAssetContentType.SetAttribute('Extension', 'pdasset')
+                        $preservedAssetContentType.SetAttribute('Extension', 'bin')
                         $preservedAssetContentType.SetAttribute('ContentType', 'application/octet-stream')
                         $null = $contentTypesDocument.DocumentElement.AppendChild($preservedAssetContentType)
 
