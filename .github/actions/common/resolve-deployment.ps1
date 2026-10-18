@@ -384,13 +384,20 @@ function Find-BuildRunByName {
 }
 
 function Find-LatestSuccessfulBuildRunForBranch {
-    # Ask GitHub for one successful conventional BUILD workflow run; no match throws.
+    # repository_dispatch runs report the workflow's default branch as head_branch;
+    # managed Releases are handled earlier, so this fallback must use direct branch runs.
     param([Parameter(Mandatory)][string]$BranchName)
     $encodedBranch = [System.Uri]::EscapeDataString($BranchName.Trim())
-    $response = Invoke-GitHubApi -RelativePath "actions/workflows/BUILD.yml/runs?branch=$encodedBranch&status=success&per_page=1"
-    $runs = @($response.workflow_runs)
-    if ($runs.Count -eq 0) { throw "No successful BUILD workflow runs were found for branch '$BranchName'." }
-    return $runs[0]
+    for ($page = 1; $page -le 100; $page++) {
+        $response = Invoke-GitHubApi -RelativePath "actions/workflows/BUILD.yml/runs?branch=$encodedBranch&status=success&per_page=100&page=$page"
+        $runs = @($response.workflow_runs)
+        if ($runs.Count -eq 0) { break }
+        $match = $runs | Where-Object {
+            [string]$_.head_branch -ceq $BranchName -and [string]$_.event -cne 'repository_dispatch'
+        } | Select-Object -First 1
+        if ($match) { return $match }
+    }
+    throw "No successful BUILD workflow runs were found for branch '$BranchName'."
 }
 
 $environmentName = $env:INPUT_ENVIRONMENT_NAME.Trim()
