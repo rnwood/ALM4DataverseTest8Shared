@@ -45,6 +45,7 @@
     Example: dotnet publish -p:BuildArtifactsPath="$(Build.ArtifactStagingDirectory)"
   -->
   <ItemGroup Condition="'$(BuildArtifactsPath)' != ''">
+    <PdSolution Include="$(BuildArtifactsPath)\solutions\*_managed.zip" />
     <None Include="$(BuildArtifactsPath)\solutions\**\*" LinkBase="PkgAssets\solutions">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

@@ -1286,6 +1286,20 @@ if ($packageDeployerEnabled) {
                     throw "Package Deployer package '$pdpkgZip' is missing PkgAssets/ImportConfig.xml."
                 }
 
+                $importConfigEntry = $packageZip.GetEntry('PkgAssets/ImportConfig.xml')
+                $importConfigStream = $importConfigEntry.Open()
+                $importConfigReader = [System.IO.StreamReader]::new($importConfigStream)
+                try {
+                    [xml]$importConfigDocument = $importConfigReader.ReadToEnd()
+                }
+                finally {
+                    $importConfigReader.Dispose()
+                }
+                $solutionImports = $importConfigDocument.DocumentElement.SelectSingleNode('solutions')
+                if ($null -eq $solutionImports -or $solutionImports.ChildNodes.Count -eq 0) {
+                    throw "Package Deployer package '$pdpkgZip' does not define any solution imports in PkgAssets/ImportConfig.xml."
+                }
+
                 if (-not ($zipEntryNames -contains 'PkgAssets/manifest.ppkg.json')) {
                     throw "Package Deployer package '$pdpkgZip' is missing PkgAssets/manifest.ppkg.json."
                 }
