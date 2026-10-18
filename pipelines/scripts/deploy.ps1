@@ -119,29 +119,44 @@ if ($packageDeployerEnabled -and -not $UseUnmanagedSolutions -and -not $insidePa
         }
     }
 
-    $pacArguments = @('package', 'deploy', '--package', $packagePath, '--environment', $targetEnvironment, '--logConsole')
-    if ($settingsEntries.Count -gt 0) {
-        $pacArguments += @('--settings', ($settingsEntries -join '|'))
-    }
+    $packageExtractionDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("alm4dataverse-package-deploy-" + [guid]::NewGuid().ToString('N'))
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($packagePath, $packageExtractionDirectory)
+        $packageAssemblyPath = Join-Path $packageExtractionDirectory 'ALM4Dataverse.PackageDeployer.dll'
+        if (-not (Test-Path -LiteralPath $packageAssemblyPath -PathType Leaf)) {
+            throw "Package Deployer archive '$packagePath' does not contain ALM4Dataverse.PackageDeployer.dll at its root."
+        }
 
-    Write-Host "##[section]Deploying via Package Deployer package: $packagePath"
-    Write-Host "##[debug]Package deploy environment: $targetEnvironment"
-    $packageDeployOutput = @(& $pac.Source @pacArguments 2>&1)
-    $packageDeployExitCode = $LASTEXITCODE
-    foreach ($line in $packageDeployOutput) {
-        Write-Host $line
-    }
-    $packageDeployText = ($packageDeployOutput | ForEach-Object { [string]$_ }) -join "`n"
+        $pacArguments = @('package', 'deploy', '--package', $packageAssemblyPath, '--environment', $targetEnvironment, '--logConsole')
+        if ($settingsEntries.Count -gt 0) {
+            $pacArguments += @('--settings', ($settingsEntries -join '|'))
+        }
 
-    if ($packageDeployExitCode -ne 0) {
-        throw "pac package deploy failed with exit code $packageDeployExitCode`n$packageDeployText"
-    }
+        Write-Host "##[section]Deploying via Package Deployer package: $packagePath"
+        Write-Host "##[debug]Package deploy environment: $targetEnvironment"
+        $packageDeployOutput = @(& $pac.Source @pacArguments 2>&1)
+        $packageDeployExitCode = $LASTEXITCODE
+        foreach ($line in $packageDeployOutput) {
+            Write-Host $line
+        }
+        $packageDeployText = ($packageDeployOutput | ForEach-Object { [string]$_ }) -join "`n"
 
-    if ($packageDeployText -match '(?im)^\s*error\s*:') {
-        throw "pac package deploy reported an error in output despite zero exit code.`n$packageDeployText"
-    }
+        if ($packageDeployExitCode -ne 0) {
+            throw "pac package deploy failed with exit code $packageDeployExitCode`n$packageDeployText"
+        }
 
-    Write-Host "##[section]Deployment completed successfully via Package Deployer package."
+        if ($packageDeployText -match '(?im)^\s*error\s*:') {
+            throw "pac package deploy reported an error in output despite zero exit code.`n$packageDeployText"
+        }
+
+        Write-Host "##[section]Deployment completed successfully via Package Deployer package."
+    }
+    finally {
+        if (Test-Path -LiteralPath $packageExtractionDirectory -PathType Container) {
+            Remove-Item -LiteralPath $packageExtractionDirectory -Recurse -Force
+        }
+    }
     return
 }
 
