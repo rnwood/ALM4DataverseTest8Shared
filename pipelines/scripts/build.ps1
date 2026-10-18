@@ -1058,9 +1058,11 @@ if ($buildSettings.versionCollisionGuard) {
 
         $packageDirectory = Join-Path $ArtifactStagingDirectory 'solutions'
         $packagePaths = @(
-            (Join-Path $packageDirectory "$solutionName.zip"),
-            (Join-Path $packageDirectory "${solutionName}_managed.zip")
-        ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+            @(
+                (Join-Path $packageDirectory "$solutionName.zip"),
+                (Join-Path $packageDirectory "${solutionName}_managed.zip")
+            ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+        )
         if ($packagePaths.Count -eq 0) {
             throw "BUILD produced no solution package for '$solutionName'; the version collision check cannot continue."
         }
