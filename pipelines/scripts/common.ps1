@@ -447,6 +447,13 @@ function Get-DefaultAzureCredentialAccessToken {
     }
 }
 
+if (-not (Get-Variable -Name 'AlmOperatingSystemWindowsDetectorInitialized' -Scope Script -ErrorAction SilentlyContinue)) {
+    function Test-AlmOperatingSystemWindows {
+        return [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+    }
+    Set-Variable -Name 'AlmOperatingSystemWindowsDetectorInitialized' -Value $true -Scope Script
+}
+
 function Get-PowerPlatformApiAccessToken {
     <#
     .SYNOPSIS

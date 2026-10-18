@@ -270,7 +270,8 @@ $usingBundledModules = $false
 if (Test-Path $bundledModulesDir) {
     $usingBundledModules = $true
     Write-Host "Using bundled modules from $bundledModulesDir"
-    $env:PSModulePath = "$bundledModulesDir;$env:PSModulePath"
+    $modulePathSeparator = [System.IO.Path]::PathSeparator
+    $env:PSModulePath = "$bundledModulesDir$modulePathSeparator$env:PSModulePath"
     foreach ($module in $config.scriptDependencies.Keys) {
         Import-Module $module -ErrorAction Stop
         $loadedModule = Get-Module -Name $module
@@ -502,7 +503,7 @@ if (-not (Test-Path $pacToolPath)) {
     New-Item -ItemType Directory -Path $pacToolPath -Force | Out-Null
 }
 
-$isWindowsOS = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+$isWindowsOS = Test-AlmOperatingSystemWindows
 
 if ($isWindowsOS) {
     Write-Host "Installing PAC CLI on Windows using MSI method with version specifier: '$pacCliVersion'"
