@@ -114,6 +114,7 @@ separately with the same build identity.
   selected pipeline artifact.
 - **The name of the deployment job matches the release number.**
 - **Environment settings are read from the configuration associated with the environment** (Azure DevOps: variable group; GitHub Actions: GitHub environment values or repository variables, with optional environment prefixes; secrets are selected explicitly in `secrets-json`), matching with those required by each solution.
+- **Optional Package Deployer path**: when `buildPackageDeployer = $true`, deployment uses `ALM4Dataverse.PackageDeployer.pdpkg.zip` from build artifacts for the standard managed deployment path.
 - **Solutions are deployed if needed in the configured dependency order**:
   - If the solution is already present with the same version, the import is skipped.
   - If the solution is not currently present in the environment, the 'Import' method is used
@@ -138,6 +139,9 @@ global unmanaged override and different import flags.
 > components that the upgrade removes. See [hook ordering](../config/alm-config.md#hooks).
 
 ## Deployment Tags
+
+See the [Git tag catalog](../config/git-tags.md) for all tag namespaces and
+which workflows create or update them.
 
 | Tag | Meaning |
 | --- | --- |

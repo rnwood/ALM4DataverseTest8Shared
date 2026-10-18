@@ -18,6 +18,9 @@
     The root directory containing the solution folders and alm-config.psd1 file.
 .PARAMETER ArtifactStagingDirectory
     The directory where the built artifacts will be placed.
+.PARAMETER SkipVersionCollisionGuard
+    Skips the remote package-content claim for temporary packages, such as the
+    unmanaged package created by IMPORT. Normal BUILD runs should not use this.
 .NOTES
     Run installdependencies.ps1 first in this process. Requires PowerShell 7 for
     parallel packing/checks. Checker failures write reports before throwing;
@@ -25,7 +28,8 @@
     Artifact contents include deployment scripts, configuration and exact dependency
     versions. When build.versionCollisionGuard is enabled, each solution package
     version is claimed against its content using a remote annotated Git tag; the
-    build identity then needs permission to create tags.
+    build identity then needs permission to create tags. IMPORT skips this claim
+    because its temporary package is deployed directly rather than published.
 .EXAMPLE
     .\pipelines\scripts\build.ps1 -SourceDirectory . -ArtifactStagingDirectory .\artifacts
 #>
@@ -35,7 +39,9 @@ param(
     [string]$SourceDirectory,
 
     [Parameter(Mandatory=$true)]
-    [string]$ArtifactStagingDirectory
+    [string]$ArtifactStagingDirectory,
+
+    [switch]$SkipVersionCollisionGuard
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,26 +51,57 @@ $ErrorActionPreference = "Stop"
 Write-Host "##[section]Building Artifacts"
 
 function Get-PacCliInstalledPackageVersion {
-    # dotnet's package listing, not pac's display banner, supplies the lock-file version.
-    # Missing tools/path or an unmatched listing return ''; strip NuGet build metadata.
+    # Prefer the tool manifest for the .NET installation, then query the Windows MSI.
+    # Missing executables or unrecognized version output return ''.
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$PacToolPath
+        [string]$PacToolPath,
+        [string]$PacPath
     )
 
-    $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
-    if (-not $dotnet) {
+    if (-not [string]::IsNullOrWhiteSpace($PacToolPath) -and (Test-Path $PacToolPath)) {
+        $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
+        if ($dotnet) {
+            $toolListOutput = @(& $dotnet.Source tool list --tool-path $PacToolPath 2>&1)
+            if ($LASTEXITCODE -eq 0) {
+                foreach ($line in $toolListOutput) {
+                    if ([string]$line -match '^\s*microsoft\.powerapps\.cli\.tool\s+(\S+)\s+') {
+                        return $Matches[1].Split('+')[0]
+                    }
+                }
+            }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($PacPath)) {
         return ''
     }
 
-    if (-not (Test-Path $PacToolPath)) {
+    if (-not (Test-Path $PacPath)) {
         return ''
     }
 
-    $toolListOutput = @(& $dotnet.Source tool list --tool-path $PacToolPath 2>&1)
-    foreach ($line in $toolListOutput) {
-        if ($line -match '^\s*microsoft\.powerapps\.cli\.tool\s+(\S+)\s+') {
-            return $Matches[1].Split('+')[0]
+    $versionOutput = @(& $PacPath --version 2>&1)
+    if ($LASTEXITCODE -eq 0) {
+        foreach ($line in $versionOutput) {
+            $lineText = [string]$line
+            if ($lineText -match '(?i)^\s*Version\s*:\s*(\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z\.-]*)?)(?:\+[0-9A-Za-z\.-]+)?(?:\s|$)') {
+                return $Matches[1]
+            }
+        }
+
+        $versionText = ($versionOutput | ForEach-Object { [string]$_ }) -join "`n"
+        if ($versionText -match '(?im)^\s*(\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z\.-]*)?)(?:\+[0-9A-Za-z\.-]+)?\s*$') {
+            return $Matches[1]
+        }
+    }
+
+    $helpOutput = @(& $PacPath 2>&1)
+    if ($LASTEXITCODE -eq 0) {
+        foreach ($line in $helpOutput) {
+            $lineText = [string]$line
+            if ($lineText -match '(?i)^\s*Version\s*:\s*(\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z\.-]*)?)(?:\+[0-9A-Za-z\.-]+)?(?:\s|$)') {
+                return $Matches[1]
+            }
         }
     }
 
@@ -770,6 +807,13 @@ foreach ($solution in $config.solutions) {
     }
 }
 Write-Host "##[debug]Loaded configuration from alm-config.psd1"
+$packageDeployerEnabled = $false
+if ($config.ContainsKey('buildPackageDeployer') -and $null -ne $config.buildPackageDeployer) {
+    if ($config.buildPackageDeployer -isnot [bool]) {
+        throw 'buildPackageDeployer must be a Boolean.'
+    }
+    $packageDeployerEnabled = $config.buildPackageDeployer
+}
 
 Invoke-Hook -HookType "preBuild" -BaseDirectory $SourceDirectory -Config $config -AdditionalContext @{
     SourceDirectory = $SourceDirectory
@@ -1042,7 +1086,7 @@ Invoke-SolutionCheck -Config $config -SourceDirectory $SourceDirectory -Artifact
 # unique name has identical normalized ZIP contents. Claim after checks pass and
 # before publishing any artifact so parallel builds cannot publish conflicting
 # content under the same version.
-if ($buildSettings.versionCollisionGuard) {
+if ($buildSettings.versionCollisionGuard -and -not $SkipVersionCollisionGuard) {
     foreach ($solution in $config.solutions) {
         $solutionName = [string]$solution.name
         $solutionXmlPath = Join-Path $SourceDirectory "solutions/$solutionName/Other/Solution.xml"
@@ -1075,7 +1119,7 @@ if ($buildSettings.versionCollisionGuard) {
             -Fingerprint $fingerprint
     }
 }
-else {
+elseif (-not $SkipVersionCollisionGuard) {
     Write-Warning 'BUILD solution version collision guard is disabled. Different package content may be published under the same solution version.'
 }
 
@@ -1147,11 +1191,17 @@ foreach ($moduleName in ([string[]] $lockConfig.scriptDependencies.Keys)) {
     }
 }
 
-$pacToolPath = Join-Path $HOME '.alm4dataverse/tools'
+$pacToolPath = Join-Path $HOME '.alm4dataverse\tools'
 $resolvedPacVersion = Get-PacCliInstalledPackageVersion -PacToolPath $pacToolPath
+if ([string]::IsNullOrWhiteSpace($resolvedPacVersion)) {
+    $pacCommand = Get-Command pac -ErrorAction SilentlyContinue
+    if ($pacCommand) {
+        $resolvedPacVersion = Get-PacCliInstalledPackageVersion -PacPath $pacCommand.Source
+    }
+}
 
 if ([string]::IsNullOrWhiteSpace($resolvedPacVersion)) {
-    throw "Unable to resolve installed PAC CLI package version from 'dotnet tool list --tool-path $pacToolPath'. Ensure installdependencies.ps1 has installed Microsoft.PowerApps.CLI.Tool before build.ps1 runs."
+    throw "Unable to resolve installed PAC CLI package version from the .NET tool list or pac output. Ensure installdependencies.ps1 has installed PAC before build.ps1 runs."
 }
 
 $lockConfig.pacCliVersion = $resolvedPacVersion
@@ -1161,9 +1211,119 @@ $lockConfig | ConvertTo-Json | Out-File $lockPath -Encoding UTF8
 
 Write-Host "##[endgroup]"
 
+if ($packageDeployerEnabled) {
+    Write-Host "##[group]Saving PowerShell modules for offline deployment"
+    $modulesDir = Join-Path $ArtifactStagingDirectory 'modules'
+    foreach ($moduleName in $lockConfig.scriptDependencies.Keys) {
+        $version = $lockConfig.scriptDependencies[$moduleName]
+        Write-Host "Saving $moduleName $version to $modulesDir"
+        Save-Module -Name $moduleName -RequiredVersion $version -Path $modulesDir -Force -AllowPrerelease:($version.Contains("-"))
+    }
+    Write-Host "##[endgroup]"
+}
+
 Write-Host "##[section]Build completed successfully!"
 
 Invoke-Hook -HookType "postBuild" -BaseDirectory $SourceDirectory -Config $config -AdditionalContext @{
     SourceDirectory = $SourceDirectory
     ArtifactStagingDirectory = $ArtifactStagingDirectory
 }
+
+# Build Package Deployer package when enabled and artifact is not already present
+$pdpkgZip = Join-Path $ArtifactStagingDirectory "ALM4Dataverse.PackageDeployer.pdpkg.zip"
+$pdProjectPath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\ALM4Dataverse.PackageDeployer\ALM4Dataverse.PackageDeployer.csproj'
+if ($packageDeployerEnabled) {
+    if (Test-Path $pdpkgZip) {
+        Write-Host "##[section]Package Deployer package already exists: $pdpkgZip"
+    }
+    else {
+        Write-Host "##[section]Building Package Deployer package"
+
+        if (-not (Test-Path $pdProjectPath)) {
+            throw "Package Deployer build is enabled (buildPackageDeployer = `$true), but project was not found at '$pdProjectPath'."
+        }
+
+        $pdProjectPath = Resolve-Path $pdProjectPath | Select-Object -ExpandProperty Path
+        $pdProjectDirectory = Split-Path $pdProjectPath -Parent
+        $legacyPublishDir = Join-Path $ArtifactStagingDirectory "packagedeployer"
+        if (Test-Path $legacyPublishDir) {
+            Remove-Item -Path $legacyPublishDir -Recurse -Force
+        }
+
+        $pdPublishDir = Join-Path ([System.IO.Path]::GetTempPath()) ("alm4dataverse-packagedeployer-" + [guid]::NewGuid().ToString('N'))
+
+        try {
+            Get-ChildItem -Path (Join-Path $pdProjectDirectory 'bin') -Filter '*.pdpkg.zip' -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force
+
+            dotnet publish $pdProjectPath `
+                -c Release `
+                -o $pdPublishDir `
+                "-p:BuildArtifactsPath=$ArtifactStagingDirectory"
+
+            if ($LASTEXITCODE -ne 0) {
+                throw "dotnet publish for Package Deployer failed with exit code $LASTEXITCODE"
+            }
+
+            $generatedPackage = Get-ChildItem -Path (Join-Path $pdProjectDirectory 'bin') -Filter '*.pdpkg.zip' -Recurse -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending |
+                Select-Object -First 1
+
+            if ($null -eq $generatedPackage) {
+                throw "dotnet publish completed, but no PDPackage-generated .pdpkg.zip was found under '$pdProjectDirectory\bin'."
+            }
+
+            Copy-Item -Path $generatedPackage.FullName -Destination $pdpkgZip -Force
+
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $packageZip = [System.IO.Compression.ZipFile]::OpenRead($pdpkgZip)
+            try {
+                $zipEntryNames = @($packageZip.Entries | ForEach-Object { $_.FullName })
+                if (-not ($zipEntryNames -contains '[Content_Types].xml')) {
+                    throw "Package Deployer package '$pdpkgZip' is missing [Content_Types].xml at the archive root."
+                }
+
+                if (-not ($zipEntryNames -contains 'PkgAssets/ImportConfig.xml')) {
+                    throw "Package Deployer package '$pdpkgZip' is missing PkgAssets/ImportConfig.xml."
+                }
+
+                if (-not ($zipEntryNames -contains 'PkgAssets/manifest.ppkg.json')) {
+                    throw "Package Deployer package '$pdpkgZip' is missing PkgAssets/manifest.ppkg.json."
+                }
+            }
+            finally {
+                $packageZip.Dispose()
+            }
+
+            Write-Host "Package Deployer package created: $pdpkgZip"
+        }
+        finally {
+            if (Test-Path $pdPublishDir) {
+                Remove-Item -Path $pdPublishDir -Recurse -Force
+            }
+        }
+    }
+
+    Write-Host "##[group]Trimming artifacts for package-based deployment"
+    $requiredArtifactItems = @(
+        'alm',
+        'alm-config.psd1',
+        'modules',
+        'scriptDependencies.lock.json',
+        'ALM4Dataverse.PackageDeployer.pdpkg.zip'
+    )
+
+    Get-ChildItem -Path $ArtifactStagingDirectory -Force | ForEach-Object {
+        if ($requiredArtifactItems -contains $_.Name) {
+            return
+        }
+
+        Write-Host "Removing non-essential artifact item: $($_.FullName)"
+        Remove-Item -Path $_.FullName -Recurse -Force
+    }
+    Write-Host "##[endgroup]"
+}
+else {
+    Write-Host "##[section]Package Deployer build skipped (buildPackageDeployer is false)."
+}
+
+Write-Host "##[section]Build completed successfully!"

@@ -402,6 +402,8 @@ After packing and solution checks, BUILD fingerprints the resulting managed and
 unmanaged package contents. A previously claimed version is accepted only when
 the package fingerprint matches, so generated mapped output is covered even when
 it is ignored or otherwise invisible to EXPORT's Git-based source-change check.
+IMPORT skips the claim for its temporary unmanaged package because it deploys that
+package directly rather than publishing a release artifact.
 On a mismatch, increment the solution version and rebuild. EXPORT does not run
 mapping `buildCommand` entries, so make sure version changes for generated
 solution content are made in source or are otherwise visible to EXPORT.
@@ -565,6 +567,9 @@ pacCliVersion = '2.13.1'
 - `'prerelease'`: Installs the latest prerelease version
 - Specific version (for example `'2.13.1'`): Installs that exact version
 
+> On Windows runners, ALM4Dataverse uses the PAC MSI install/update path. In that case,
+> prefer `''` or an exact full-framework CLI version (for example `1.50.1`).
+
 For reproducible builds/deployments, pin an explicit version.
 
 > [!NOTE]
@@ -640,6 +645,30 @@ Accepted values:
 The baseline and candidate each use the deployment script and configuration
 packaged with their own build. If resolving, downloading, or deploying the
 baseline fails, BUILD fails and does not deploy the candidate.
+
+### Package Deployer Build
+
+Use `buildPackageDeployer` to control Package Deployer package generation during `BUILD`.
+
+```powershell
+buildPackageDeployer = $true
+```
+
+When enabled, `pipelines/scripts/build.ps1` ensures `ALM4Dataverse.PackageDeployer.pdpkg.zip` exists in the artifact staging directory:
+
+- If the package zip already exists, it is reused.
+- If the package zip is missing, it is auto-generated via `dotnet publish` from `ALM4Dataverse.PackageDeployer.csproj`.
+- If enabled but the Package Deployer project is missing, the build fails with a clear error.
+
+When this setting is enabled, `pipelines/scripts/deploy.ps1` also deploys using that package from build artifacts (via `pac package deploy`) for the standard managed deployment path.
+
+- If `UseUnmanagedSolutions` is requested (IMPORT scenario), deployment falls back to the script-based unmanaged flow.
+- Inside the Package Deployer package itself, script-based deployment steps continue to run (no recursive package deploy).
+- Build artifacts are trimmed to the minimum required for package-based deployment: `alm/`, `alm-config.psd1`, `modules/`, `scriptDependencies.lock.json`, and `ALM4Dataverse.PackageDeployer.pdpkg.zip`.
+
+On Windows runners, `installdependencies.ps1` uses the official Power Platform CLI MSI install/update method and then applies the configured `pacCliVersion` using `pac install`.
+
+Default: `$false`.
 
 ### Solution Check (PAC `solution check`)
 
